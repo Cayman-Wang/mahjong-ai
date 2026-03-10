@@ -5,6 +5,10 @@ __pycache__/
 .dist/
 .build/
 dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .venv/
 .venv310/
 .history/
