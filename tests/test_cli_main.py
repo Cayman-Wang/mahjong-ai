@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import sys
 import unittest
+from unittest import mock
 
-from mahjong_ai.cli.main import _parse_seed_list, build_parser
+from mahjong_ai.cli.main import _parse_seed_list, build_parser, cmd_eval_benchmark
+from mahjong_ai.evaluation.benchmark_config import EvalBenchmarkConfig
 
 
 class TestCliMain(unittest.TestCase):
@@ -44,6 +47,47 @@ class TestCliMain(unittest.TestCase):
         self.assertFalse(args.quiet_ray_future_warning)
         self.assertTrue(args.quiet_ray_deprecation_warning)
         self.assertFalse(args.strict_illegal_action)
+
+    def test_eval_benchmark_parser_accepts_config_and_checkpoint(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "eval-benchmark",
+            "--config",
+            "configs/eval/standard.yaml",
+            "--checkpoint",
+            "runs/ppo_selfplay",
+        ])
+        self.assertEqual(args.cmd, "eval-benchmark")
+        self.assertEqual(args.config, "configs/eval/standard.yaml")
+        self.assertEqual(args.checkpoint, "runs/ppo_selfplay")
+
+    def test_cmd_eval_benchmark_uses_loaded_protocol(self) -> None:
+        args = argparse.Namespace(
+            config="configs/eval/standard.yaml",
+            checkpoint="runs/ppo_selfplay",
+            output=None,
+        )
+        cfg = EvalBenchmarkConfig(
+            benchmark_name="standard",
+            rules_path="configs/rules/sichuan_xuezhan_default.yaml",
+            baselines=["heuristic"],
+            games=4,
+            seed=101,
+            seed_list=[101, 102, 103, 104],
+            strict_illegal_action=False,
+        )
+
+        with mock.patch("mahjong_ai.cli.main.load_eval_benchmark_config", return_value=cfg), mock.patch(
+            "mahjong_ai.training.rllib_runner.run_evaluation_entry"
+        ) as mocked_eval:
+            rc = cmd_eval_benchmark(args)
+
+        self.assertEqual(rc, 0)
+        mocked_eval.assert_called_once()
+        kwargs = mocked_eval.call_args.kwargs
+        self.assertEqual(kwargs["benchmark_name"], "standard")
+        self.assertEqual(kwargs["games"], 4)
+        self.assertEqual(kwargs["seed_list"], [101, 102, 103, 104])
 
     def test_grid_rllib_parser_accepts_params(self) -> None:
         parser = build_parser()

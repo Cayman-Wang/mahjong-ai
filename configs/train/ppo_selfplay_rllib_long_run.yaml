@@ -1,0 +1,43 @@
+experiment_name: ppo_selfplay_long_run
+seed: 1
+run_dir: runs
+num_iterations: 100
+checkpoint_every: 10
+
+rollout_workers: 0
+num_envs_per_worker: 1
+num_gpus: 0
+num_learners: 0
+num_gpus_per_learner: null
+num_cpus_per_learner: auto
+
+train_batch_size: 8192
+sgd_minibatch_size: 1024
+num_sgd_iter: 10
+lr: 0.0003
+clip_param: 0.2
+gamma: 0.99
+lambda: 0.95
+
+model:
+  hidden_sizes: [512, 512]
+
+warnings:
+  quiet_ray_future_warning: false
+  quiet_new_api_stack_warning: false
+  quiet_ray_deprecation_warning: false
+
+self_play:
+  enabled: true
+  opponent_pool_size: 4
+  snapshot_interval: 5
+  main_policy_opponent_prob: 0.2
+  seat0_always_main: true
+
+evaluation:
+  eval_every: 10
+  eval_games: 48
+  baselines: [heuristic, random]
+  seed_list: []
+  output_path: ""
+  strict_illegal_action: true

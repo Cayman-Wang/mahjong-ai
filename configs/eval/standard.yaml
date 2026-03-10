@@ -1,11 +1,10 @@
-# Legacy compatibility alias. Prefer smoke.yaml / standard.yaml / long_run.yaml.
-benchmark_name: arena_legacy
-description: Legacy alias of the standard benchmark protocol.
+benchmark_name: standard
+description: Default reproducible benchmark for day-to-day checkpoint comparison.
 rules_path: configs/rules/sichuan_xuezhan_default.yaml
 baselines: [heuristic, random]
 games: 16
 seed_file: seeds/standard.json
-output_path: runs/benchmarks/arena
+output_path: runs/benchmarks/standard
 strict_illegal_action: true
 quiet_ray_future_warning: false
 quiet_new_api_stack_warning: false

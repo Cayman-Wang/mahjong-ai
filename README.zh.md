@@ -9,6 +9,7 @@
 
 ## 计划与研究文档
 
+- 项目总览：`research/guides/project_overview_zh.md`
 - 当前主计划入口：`research/plans/ACTIVE_PLAN.md`
 - 主计划：`research/plans/mahjong-ai/master_plan_zh.md`
 - 历史交接与审查：`research/handoffs/`、`research/reviews/`
@@ -55,16 +56,25 @@ pip install -e ".[rl,extras,dev]"
 ## RL 训练与评测
 
 - 推荐环境与 smoke 流程：`docs/training_env.md`
+- 正式训练模板：`configs/train/ppo_selfplay_rllib_smoke.yaml`、`configs/train/ppo_selfplay_rllib_standard.yaml`、`configs/train/ppo_selfplay_rllib_long_run.yaml`
+- 正式 benchmark 协议：`configs/eval/smoke.yaml`、`configs/eval/standard.yaml`、`configs/eval/long_run.yaml`
 
 最小训练：
 
 ```bash
 PYTHONPATH=src python -m mahjong_ai.cli.main train-rllib \
-  --config configs/train/ppo_selfplay_rllib.yaml \
+  --config configs/train/ppo_selfplay_rllib_smoke.yaml \
   --num-iterations 1 --checkpoint-every 1 --eval-every 1 --eval-games 1
 ```
 
-训练默认启用共享主策略 + 对手池自对弈（`self_play.enabled=true`），可在 `configs/train/ppo_selfplay_rllib.yaml` 调整：
+日常训练建议使用：
+
+```bash
+PYTHONPATH=src python -m mahjong_ai.cli.main train-rllib \
+  --config configs/train/ppo_selfplay_rllib_standard.yaml
+```
+
+训练默认启用共享主策略 + 对手池自对弈，可在训练模板中调整：
 - `self_play.opponent_pool_size`
 - `self_play.snapshot_interval`
 - `self_play.main_policy_opponent_prob`
@@ -89,14 +99,28 @@ PYTHONPATH=src python -m mahjong_ai.cli.main grid-rllib \
 - `runs/self_play_grid/grid_report_<timestamp>.json`
 - `runs/self_play_grid/grid_report_<timestamp>.md`
 
-评测 checkpoint：
+按冻结 benchmark 评测 checkpoint：
+
+```bash
+PYTHONPATH=src python -m mahjong_ai.cli.main eval-benchmark \
+  --config configs/eval/standard.yaml \
+  --checkpoint runs/ppo_selfplay
+```
+
+手动评测 checkpoint（自定义基线/样本量）：
 
 ```bash
 PYTHONPATH=src python -m mahjong_ai.cli.main eval-rllib \
   --checkpoint runs/ppo_selfplay \
   --baselines heuristic,random \
   --games 20 --seed 1 \
-  --output runs/ppo_selfplay/eval
+  --output runs/ppo_selfplay/eval_manual
+```
+
+对比多份评测报告：
+
+```bash
+python scripts/compare_eval.py runs/benchmarks/standard/*.json
 ```
 
 一键 smoke（单测 + sim + train + resume）：
@@ -113,3 +137,4 @@ bash scripts/train_smoke.sh
 - `src/mahjong_ai/agents/`：基线智能体
 - `src/mahjong_ai/training/`：训练入口（可选）
 - `src/mahjong_ai/evaluation/`：评测与指标
+- `src/mahjong_ai/integrations/vision_bot/`：未来预留接口，当前未实现

@@ -4,6 +4,11 @@ run_dir: runs
 num_iterations: 50
 checkpoint_every: 5
 
+# For staged execution, prefer:
+# - configs/train/ppo_selfplay_rllib_smoke.yaml
+# - configs/train/ppo_selfplay_rllib_standard.yaml
+# - configs/train/ppo_selfplay_rllib_long_run.yaml
+
 # Keep defaults lightweight so a local first run can start quickly.
 rollout_workers: 0
 num_envs_per_worker: 1

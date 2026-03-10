@@ -9,6 +9,7 @@ import pickle
 import statistics
 import time
 import warnings
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from mahjong_ai.rules.schema import RulesConfig
 from mahjong_ai.training.rllib_action_mask_rl_module import MahjongActionMaskTorchRLModule
 
 SHARED_POLICY_ID = "shared_policy"
+EVAL_REPORT_SCHEMA_VERSION = 2
 
 NEW_API_STACK_WARNING_MSG = "You are running PPO on the new API stack!"
 RAY_ACCEL_OVERRIDE_FUTURE_WARNING_REGEX = (
@@ -443,6 +445,38 @@ def _write_eval_report(*, path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _build_rules_metadata(*, rules: RulesConfig, rules_path: str) -> dict[str, Any]:
+    return {
+        "path": str(rules_path or ""),
+        "config": asdict(rules),
+    }
+
+
+def _build_evaluation_metadata(
+    *,
+    baselines: list[str],
+    eval_seeds: list[int],
+    base_seed: int,
+    seed_source: str,
+    strict_illegal_action: bool,
+    benchmark_name: str = "",
+    benchmark_config_path: str = "",
+) -> dict[str, Any]:
+    if seed_source not in {"range", "fixed_list"}:
+        raise ValueError("seed_source must be 'range' or 'fixed_list'")
+
+    return {
+        "benchmark_name": str(benchmark_name or ""),
+        "benchmark_config_path": str(benchmark_config_path or ""),
+        "baselines": [str(name) for name in baselines],
+        "games": len(eval_seeds),
+        "base_seed": int(base_seed),
+        "seed_source": seed_source,
+        "seed_list": [int(seed) for seed in eval_seeds],
+        "strict_illegal_action": bool(strict_illegal_action),
+    }
+
+
 def _agent_id_to_int(agent_id: Any) -> int:
     if isinstance(agent_id, int):
         return agent_id
@@ -723,6 +757,7 @@ def evaluate_checkpoint_with_rllib(
     *,
     checkpoint_path: str,
     rules: RulesConfig,
+    rules_path: str = "",
     baselines: list[str],
     games: int,
     seed: int,
@@ -732,6 +767,8 @@ def evaluate_checkpoint_with_rllib(
     quiet_new_api_stack_warning: bool = False,
     quiet_ray_deprecation_warning: bool = False,
     strict_illegal_action: bool = True,
+    benchmark_name: str = "",
+    benchmark_config_path: str = "",
 ) -> dict[str, Any]:  # pragma: no cover
     ray, torch, _, Columns, _, _, _, register_env = _require_rllib()
 
@@ -782,11 +819,20 @@ def evaluate_checkpoint_with_rllib(
             )
 
         payload: dict[str, Any] = {
+            "report_schema_version": EVAL_REPORT_SCHEMA_VERSION,
             "mode": "checkpoint_eval",
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "checkpoint_path": display_path,
-            "baselines": baselines,
-            "eval_seeds": eval_seeds,
+            "rules": _build_rules_metadata(rules=rules, rules_path=rules_path),
+            "evaluation": _build_evaluation_metadata(
+                baselines=baselines,
+                eval_seeds=eval_seeds,
+                base_seed=int(seed),
+                seed_source="fixed_list" if seed_list else "range",
+                strict_illegal_action=bool(strict_illegal_action),
+                benchmark_name=benchmark_name,
+                benchmark_config_path=benchmark_config_path,
+            ),
             "metrics": metrics,
         }
 
@@ -816,6 +862,7 @@ def train_with_rllib(
     engine: GameEngine,
     config: dict[str, Any],
     resume_from: str | None = None,
+    rules_path: str = "",
 ) -> None:  # pragma: no cover
     """Run PPO self-play training (shared main policy + optional opponent pool)."""
 
@@ -982,11 +1029,21 @@ def train_with_rllib(
                 print(f"[eval] {_format_eval_console(eval_metrics)}")
 
                 eval_payload = {
+                    "report_schema_version": EVAL_REPORT_SCHEMA_VERSION,
                     "mode": "training_eval",
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "experiment_name": cfg["experiment_name"],
                     "iteration": iteration,
-                    "eval_seeds": eval_seeds,
+                    "rules": _build_rules_metadata(rules=rules_template, rules_path=rules_path),
+                    "evaluation": _build_evaluation_metadata(
+                        baselines=list(eval_cfg["baselines"]),
+                        eval_seeds=eval_seeds,
+                        base_seed=cfg["seed"] + iteration * 1000,
+                        seed_source="fixed_list" if eval_cfg["seed_list"] else "range",
+                        strict_illegal_action=bool(eval_cfg["strict_illegal_action"]),
+                    ),
                     "metrics": eval_metrics,
+                    "resolved_config_path": str(exp_dir / "resolved_config.json"),
                     "self_play": {
                         "enabled": bool(self_play_cfg["enabled"]),
                         "opponent_pool_size": len(opponent_policy_ids),
@@ -1066,7 +1123,7 @@ def run_training_entry(
         rules = RulesConfig()
 
     engine = GameEngine(rules=rules, enable_events=False)
-    train_with_rllib(engine=engine, config=cfg, resume_from=resume_from)
+    train_with_rllib(engine=engine, config=cfg, resume_from=resume_from, rules_path=rules_path)
 
 
 def run_evaluation_entry(
@@ -1082,6 +1139,8 @@ def run_evaluation_entry(
     quiet_new_api_stack_warning: bool = False,
     quiet_ray_deprecation_warning: bool = False,
     strict_illegal_action: bool = True,
+    benchmark_name: str = "",
+    benchmark_config_path: str = "",
 ) -> dict[str, Any]:
     rules: RulesConfig
     if rules_path:
@@ -1092,6 +1151,7 @@ def run_evaluation_entry(
     return evaluate_checkpoint_with_rllib(
         checkpoint_path=checkpoint_path,
         rules=rules,
+        rules_path=rules_path,
         baselines=baselines,
         seed=int(seed),
         games=int(games),
@@ -1101,6 +1161,8 @@ def run_evaluation_entry(
         quiet_new_api_stack_warning=bool(quiet_new_api_stack_warning),
         quiet_ray_deprecation_warning=bool(quiet_ray_deprecation_warning),
         strict_illegal_action=bool(strict_illegal_action),
+        benchmark_name=str(benchmark_name or ""),
+        benchmark_config_path=str(benchmark_config_path or ""),
     )
 
 

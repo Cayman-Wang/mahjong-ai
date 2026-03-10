@@ -39,15 +39,20 @@ bash scripts/train_smoke.sh
 
 ```bash
 PYTHONPATH=src python -m mahjong_ai.cli.main train-rllib \
-  --config configs/train/ppo_selfplay_rllib.yaml \
+  --config configs/train/ppo_selfplay_rllib_smoke.yaml \
   --num-iterations 1 --checkpoint-every 1 --eval-every 1 --eval-games 1
 ```
+
+推荐模板：
+- smoke：`configs/train/ppo_selfplay_rllib_smoke.yaml`
+- standard：`configs/train/ppo_selfplay_rllib_standard.yaml`
+- long-run：`configs/train/ppo_selfplay_rllib_long_run.yaml`
 
 静音可选告警（默认保留告警输出）：
 
 ```bash
 PYTHONPATH=src python -m mahjong_ai.cli.main train-rllib \
-  --config configs/train/ppo_selfplay_rllib.yaml \
+  --config configs/train/ppo_selfplay_rllib_standard.yaml \
   --quiet-ray-future-warning --quiet-new-api-stack-warning
 ```
 
@@ -76,9 +81,22 @@ PYTHONPATH=src python -m mahjong_ai.cli.main grid-rllib \
 评测 checkpoint：
 
 ```bash
+PYTHONPATH=src python -m mahjong_ai.cli.main eval-benchmark \
+  --config configs/eval/standard.yaml \
+  --checkpoint runs/ppo_selfplay
+```
+
+自定义评测：
+
+```bash
 PYTHONPATH=src python -m mahjong_ai.cli.main eval-rllib \
   --checkpoint runs/ppo_selfplay \
   --baselines heuristic,random \
   --games 20 --seed 1 \
   --output runs/ppo_selfplay/eval
 ```
+
+正式 benchmark 配置：
+- `configs/eval/smoke.yaml`
+- `configs/eval/standard.yaml`
+- `configs/eval/long_run.yaml`

@@ -1,5 +1,7 @@
 # Handoff (mahjong-ai)
 
+> 状态说明（2026-03-10）：本文档仅反映 2026-02-12 会话结束时状态，其中“训练 runner 未实现”等结论已过时。当前状态请优先参考 `research/guides/project_overview_zh.md`、`research/handoffs/2026-03-10_project_status_refresh.md` 和 `research/plans/ACTIVE_PLAN.md`。
+
 Date: 2026-02-12
 Repo root: /home/grasp/Desktop/mahjong-ai
 

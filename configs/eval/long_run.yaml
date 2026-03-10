@@ -1,0 +1,11 @@
+benchmark_name: long_run
+description: Heavier benchmark for milestone gating and final checkpoint promotion.
+rules_path: configs/rules/sichuan_xuezhan_default.yaml
+baselines: [heuristic, random]
+games: 48
+seed_file: seeds/long_run.json
+output_path: runs/benchmarks/long_run
+strict_illegal_action: true
+quiet_ray_future_warning: false
+quiet_new_api_stack_warning: false
+quiet_ray_deprecation_warning: false

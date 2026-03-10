@@ -1,0 +1,11 @@
+benchmark_name: smoke
+description: Minimal regression benchmark for checkpoint sanity checks.
+rules_path: configs/rules/sichuan_xuezhan_default.yaml
+baselines: [heuristic, random]
+games: 4
+seed_file: seeds/smoke.json
+output_path: runs/benchmarks/smoke
+strict_illegal_action: true
+quiet_ray_future_warning: false
+quiet_new_api_stack_warning: false
+quiet_ray_deprecation_warning: false

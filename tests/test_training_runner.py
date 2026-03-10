@@ -110,6 +110,47 @@ class TestTrainingRunner(unittest.TestCase):
         self.assertEqual(call_kwargs["seed_list"], [1, 2, 3])
         self.assertEqual(call_kwargs["checkpoint_path"], "runs/ppo_selfplay")
 
+    def test_run_evaluation_entry_passes_benchmark_metadata(self) -> None:
+        with mock.patch("mahjong_ai.training.rllib_runner.evaluate_checkpoint_with_rllib") as mocked_eval:
+            rllib_runner.run_evaluation_entry(
+                checkpoint_path="runs/ppo_selfplay",
+                rules_path="",
+                baselines=["heuristic"],
+                seed=11,
+                games=1,
+                seed_list=[11],
+                output_path=None,
+                benchmark_name="smoke",
+                benchmark_config_path="configs/eval/smoke.yaml",
+            )
+
+        call_kwargs = mocked_eval.call_args.kwargs
+        self.assertEqual(call_kwargs["benchmark_name"], "smoke")
+        self.assertEqual(call_kwargs["benchmark_config_path"], "configs/eval/smoke.yaml")
+
+    def test_build_rules_metadata_includes_path_and_config(self) -> None:
+        metadata = rllib_runner._build_rules_metadata(
+            rules=RulesConfig(),
+            rules_path="configs/rules/sichuan_xuezhan_default.yaml",
+        )
+        self.assertEqual(metadata["path"], "configs/rules/sichuan_xuezhan_default.yaml")
+        self.assertIn("swap_enabled", metadata["config"])
+
+    def test_build_evaluation_metadata_tracks_seed_source_and_benchmark(self) -> None:
+        metadata = rllib_runner._build_evaluation_metadata(
+            baselines=["heuristic", "random"],
+            eval_seeds=[101, 102],
+            base_seed=100,
+            seed_source="fixed_list",
+            strict_illegal_action=False,
+            benchmark_name="standard",
+            benchmark_config_path="configs/eval/standard.yaml",
+        )
+        self.assertEqual(metadata["seed_source"], "fixed_list")
+        self.assertEqual(metadata["benchmark_name"], "standard")
+        self.assertEqual(metadata["benchmark_config_path"], "configs/eval/standard.yaml")
+        self.assertEqual(metadata["games"], 2)
+
     def test_normalize_resume_from_remote_uri_passthrough(self) -> None:
         path_for_restore, display_path = rllib_runner._normalize_resume_from("s3://bucket/checkpoint")
         self.assertEqual(path_for_restore, "s3://bucket/checkpoint")

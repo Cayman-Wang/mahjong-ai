@@ -9,6 +9,7 @@ from mahjong_ai.agents.base import AgentContext
 from mahjong_ai.agents.registry import make_agent
 from mahjong_ai.core.engine import GameEngine
 from mahjong_ai.core.tiles import pretty_tile
+from mahjong_ai.evaluation.benchmark_config import load_eval_benchmark_config
 from mahjong_ai.rules.loader import load_rules
 from mahjong_ai.rules.schema import RulesConfig
 
@@ -204,6 +205,28 @@ def cmd_eval_rllib(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval_benchmark(args: argparse.Namespace) -> int:
+    from mahjong_ai.training.rllib_runner import run_evaluation_entry
+
+    benchmark_cfg = load_eval_benchmark_config(args.config)
+    run_evaluation_entry(
+        checkpoint_path=args.checkpoint,
+        rules_path=benchmark_cfg.rules_path,
+        baselines=benchmark_cfg.baselines,
+        seed=benchmark_cfg.seed,
+        games=benchmark_cfg.games,
+        seed_list=benchmark_cfg.seed_list,
+        output_path=args.output if args.output is not None else (benchmark_cfg.output_path or None),
+        quiet_ray_future_warning=benchmark_cfg.quiet_ray_future_warning,
+        quiet_new_api_stack_warning=benchmark_cfg.quiet_new_api_stack_warning,
+        quiet_ray_deprecation_warning=benchmark_cfg.quiet_ray_deprecation_warning,
+        strict_illegal_action=benchmark_cfg.strict_illegal_action,
+        benchmark_name=benchmark_cfg.benchmark_name,
+        benchmark_config_path=args.config,
+    )
+    return 0
+
+
 def cmd_grid_rllib(args: argparse.Namespace) -> int:
     from mahjong_ai.training.self_play_grid import run_self_play_grid
 
@@ -316,6 +339,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="raise immediately on illegal actions during evaluation",
     )
     eval_cmd.set_defaults(func=cmd_eval_rllib)
+
+    eval_bench_cmd = sub.add_parser(
+        "eval-benchmark",
+        help="evaluate a RLlib checkpoint using a frozen benchmark config",
+    )
+    eval_bench_cmd.add_argument(
+        "--config",
+        type=str,
+        default="configs/eval/standard.yaml",
+        help="path to benchmark yaml/json config",
+    )
+    eval_bench_cmd.add_argument("--checkpoint", type=str, required=True, help="checkpoint path/URI to evaluate")
+    eval_bench_cmd.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="optional output json file (or directory); overrides benchmark config when provided",
+    )
+    eval_bench_cmd.set_defaults(func=cmd_eval_benchmark)
 
     grid_cmd = sub.add_parser("grid-rllib", help="run self-play stability grid and output ranked report")
     grid_cmd.add_argument("--config", type=str, default="configs/train/ppo_selfplay_rllib.yaml")
