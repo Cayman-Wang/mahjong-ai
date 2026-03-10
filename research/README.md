@@ -18,5 +18,6 @@
 - Active plan: `research/plans/ACTIVE_PLAN.md`
 - Master plan: `research/plans/mahjong-ai/master_plan_zh.md`
 - Latest handoff: `research/handoffs/2026-02-12_session_handoff_mahjong-ai.md`
-- Latest review: `research/reviews/2026-02-13_第二轮审查-1.md`
+- Reviews index: `research/reviews/README.md`
+- Latest review: `research/reviews/2026-02-13_第三轮审查-1.md`
 - Project usage README stays at repo root: `README.zh.md`

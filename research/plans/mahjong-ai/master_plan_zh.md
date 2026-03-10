@@ -13,7 +13,8 @@
 - `research/plans/ACTIVE_PLAN.md` 是当前唯一活动入口。
 - 历史根目录计划已迁移至 `research/plans/mahjong-ai/archive/PLAN_2026-02-13_legacy_zh.md`。
 - 历史交接已迁移至 `research/handoffs/2026-02-12_session_handoff_mahjong-ai.md`。
-- 历史审查已迁移至 `research/reviews/2026-02-13_第二轮审查-1.md`。
+- 正式审查索引位于 `research/reviews/README.md`，最新审查为 `research/reviews/2026-02-13_第三轮审查-1.md`。
+- 早期调试审查草稿已归档到 `research/reviews/archive/`。
 - 根目录保留 `README.zh.md` 作为项目使用说明与包说明入口。
 
 ## 三、当前状态

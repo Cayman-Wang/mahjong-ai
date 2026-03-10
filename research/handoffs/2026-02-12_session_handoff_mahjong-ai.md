@@ -6,7 +6,7 @@ Repo root: /home/grasp/Desktop/mahjong-ai
 ## 1) Session Goal / Scope / Hard Constraints
 
 Goal:
-- Validate the issues listed in `第二次审核.md` against the current codebase.
+- Validate the issues listed in `research/reviews/archive/2026-02-10_第二次审核.md` against the current codebase.
 - Fix the issues that *do* exist (and keep behavior configurable where necessary).
 - Keep the engine deterministic and maintain invariants (zero-sum settlement, tile conservation, action-mask/step contract).
 
