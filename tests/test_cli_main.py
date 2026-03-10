@@ -99,6 +99,8 @@ class TestCliMain(unittest.TestCase):
             "1",
             "--main-probs",
             "0.2,0.4",
+            "--benchmark-config",
+            "configs/eval/smoke.yaml",
             "--python-bin",
             "/usr/bin/python3",
         ])
@@ -106,12 +108,14 @@ class TestCliMain(unittest.TestCase):
         self.assertEqual(args.pool_sizes, "2,4")
         self.assertEqual(args.snapshot_intervals, "1")
         self.assertEqual(args.main_probs, "0.2,0.4")
+        self.assertEqual(args.benchmark_config, "configs/eval/smoke.yaml")
         self.assertEqual(args.python_bin, "/usr/bin/python3")
 
     def test_grid_rllib_parser_warning_toggles_default_keep(self) -> None:
         parser = build_parser()
         args = parser.parse_args(["grid-rllib"])
         self.assertEqual(args.cmd, "grid-rllib")
+        self.assertEqual(args.benchmark_config, "")
         self.assertFalse(args.quiet_ray_future_warning)
         self.assertFalse(args.quiet_new_api_stack_warning)
         self.assertFalse(args.quiet_ray_deprecation_warning)

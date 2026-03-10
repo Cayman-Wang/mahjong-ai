@@ -247,6 +247,7 @@ def cmd_grid_rllib(args: argparse.Namespace) -> int:
         quiet_ray_future_warning=bool(args.quiet_ray_future_warning),
         quiet_new_api_stack_warning=bool(args.quiet_new_api_stack_warning),
         quiet_ray_deprecation_warning=bool(args.quiet_ray_deprecation_warning),
+        benchmark_config_path=str(args.benchmark_config),
     )
     return 0
 
@@ -361,6 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     grid_cmd = sub.add_parser("grid-rllib", help="run self-play stability grid and output ranked report")
     grid_cmd.add_argument("--config", type=str, default="configs/train/ppo_selfplay_rllib.yaml")
+    grid_cmd.add_argument("--benchmark-config", type=str, default="")
     grid_cmd.add_argument("--rules", type=str, default="")
     grid_cmd.add_argument("--run-dir", type=str, default="runs/self_play_grid")
     grid_cmd.add_argument("--experiment-prefix", type=str, default="grid_sp")

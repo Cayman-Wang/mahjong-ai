@@ -7,11 +7,12 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Hashable
 
+from mahjong_ai.evaluation.benchmark_config import EvalBenchmarkConfig, load_eval_benchmark_config
 from mahjong_ai.training.rllib_runner import load_train_config
 
 
@@ -216,6 +217,80 @@ print(json.dumps(data, ensure_ascii=False))
     return cfg
 
 
+def _load_benchmark_config_with_python_fallback(
+    *,
+    benchmark_config_path: str,
+    python_bin: str,
+    cwd: Path,
+    env: dict[str, str],
+) -> EvalBenchmarkConfig:
+    try:
+        cfg = load_eval_benchmark_config(benchmark_config_path)
+    except RuntimeError as e:
+        suffix = Path(benchmark_config_path).suffix.lower()
+        if "PyYAML is required" not in str(e) or suffix not in {".yaml", ".yml"}:
+            raise
+
+        code = """
+import json
+import sys
+from dataclasses import asdict
+
+from mahjong_ai.evaluation.benchmark_config import load_eval_benchmark_config
+
+cfg = load_eval_benchmark_config(sys.argv[1])
+print(json.dumps(asdict(cfg), ensure_ascii=False))
+"""
+        try:
+            proc = subprocess.run(
+                [python_bin, "-c", code, str(Path(benchmark_config_path).expanduser().resolve())],
+                check=True,
+                cwd=str(cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as sub_err:
+            stderr = (sub_err.stderr or "").strip()
+            raise RuntimeError(
+                "failed to parse benchmark config via --python-bin; ensure that interpreter has PyYAML installed"
+                + (f": {stderr}" if stderr else "")
+            ) from e
+
+        cfg = EvalBenchmarkConfig(**json.loads(proc.stdout))
+        cfg.validate()
+
+    return cfg
+
+
+def _resolve_benchmark_seed_list(benchmark_cfg: EvalBenchmarkConfig) -> list[int]:
+    if benchmark_cfg.seed_list:
+        return [int(seed) for seed in benchmark_cfg.seed_list]
+    return [int(benchmark_cfg.seed + offset) for offset in range(int(benchmark_cfg.games))]
+
+
+def _apply_benchmark_to_grid_config(
+    *,
+    train_cfg: dict[str, Any],
+    rules_path: str,
+    benchmark_cfg: EvalBenchmarkConfig,
+    benchmark_config_path: str,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    cfg = copy.deepcopy(train_cfg)
+    eval_cfg = cfg.setdefault("evaluation", {})
+    eval_cfg["baselines"] = [str(name) for name in benchmark_cfg.baselines]
+    eval_cfg["eval_games"] = int(benchmark_cfg.games)
+    eval_cfg["seed_list"] = _resolve_benchmark_seed_list(benchmark_cfg)
+    eval_cfg["strict_illegal_action"] = bool(benchmark_cfg.strict_illegal_action)
+
+    effective_rules_path = str(rules_path or benchmark_cfg.rules_path or "")
+    metadata = asdict(benchmark_cfg)
+    metadata["benchmark_config_path"] = str(Path(benchmark_config_path).expanduser().resolve())
+    metadata["effective_seed_list"] = list(eval_cfg["seed_list"])
+    metadata["effective_rules_path"] = effective_rules_path
+    return cfg, effective_rules_path, metadata
+
+
 def run_self_play_grid(
     *,
     config_path: str,
@@ -234,6 +309,7 @@ def run_self_play_grid(
     quiet_ray_future_warning: bool,
     quiet_new_api_stack_warning: bool,
     quiet_ray_deprecation_warning: bool,
+    benchmark_config_path: str = "",
 ) -> dict[str, Any]:
     combos = build_grid_combinations(
         pool_sizes=pool_sizes,
@@ -256,6 +332,23 @@ def run_self_play_grid(
         cwd=root,
         env=env,
     )
+    effective_rules_path = str(rules_path or "")
+    effective_eval_games = int(eval_games)
+    benchmark_metadata: dict[str, Any] = {}
+    if benchmark_config_path:
+        benchmark_cfg = _load_benchmark_config_with_python_fallback(
+            benchmark_config_path=benchmark_config_path,
+            python_bin=python_bin,
+            cwd=root,
+            env=env,
+        )
+        base_cfg, effective_rules_path, benchmark_metadata = _apply_benchmark_to_grid_config(
+            train_cfg=base_cfg,
+            rules_path=effective_rules_path,
+            benchmark_cfg=benchmark_cfg,
+            benchmark_config_path=benchmark_config_path,
+        )
+        effective_eval_games = int(base_cfg["evaluation"]["eval_games"])
 
     run_path = Path(run_dir).expanduser().resolve()
     configs_path = run_path / "grid_configs"
@@ -294,12 +387,12 @@ def run_self_play_grid(
             "--eval-every",
             str(eval_every),
             "--eval-games",
-            str(eval_games),
+            str(effective_eval_games),
             "--seed",
             str(seed),
         ]
-        if rules_path:
-            cmd.extend(["--rules", rules_path])
+        if effective_rules_path:
+            cmd.extend(["--rules", effective_rules_path])
         if quiet_ray_future_warning:
             cmd.append("--quiet-ray-future-warning")
         if quiet_new_api_stack_warning:
@@ -349,9 +442,10 @@ def run_self_play_grid(
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "config_path": str(Path(config_path).expanduser().resolve()),
-        "rules_path": str(Path(rules_path).expanduser().resolve()) if rules_path else "",
+        "rules_path": str(Path(effective_rules_path).expanduser().resolve()) if effective_rules_path else "",
         "run_dir": str(run_path),
         "experiment_prefix": experiment_prefix,
+        "benchmark": benchmark_metadata,
         "grid": {
             "pool_sizes": pool_sizes,
             "snapshot_intervals": snapshot_intervals,
@@ -359,7 +453,7 @@ def run_self_play_grid(
             "num_iterations": num_iterations,
             "checkpoint_every": checkpoint_every,
             "eval_every": eval_every,
-            "eval_games": eval_games,
+            "eval_games": effective_eval_games,
             "seed": seed,
         },
         "rows": rows,
@@ -382,6 +476,7 @@ def run_self_play_grid(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m mahjong_ai.training.self_play_grid")
     parser.add_argument("--config", type=str, default="configs/train/ppo_selfplay_rllib.yaml")
+    parser.add_argument("--benchmark-config", type=str, default="")
     parser.add_argument("--rules", type=str, default="")
     parser.add_argument("--run-dir", type=str, default="runs/self_play_grid")
     parser.add_argument("--experiment-prefix", type=str, default="grid_sp")
@@ -434,6 +529,7 @@ def main(argv: list[str] | None = None) -> int:
         quiet_ray_future_warning=bool(args.quiet_ray_future_warning),
         quiet_new_api_stack_warning=bool(args.quiet_new_api_stack_warning),
         quiet_ray_deprecation_warning=bool(args.quiet_ray_deprecation_warning),
+        benchmark_config_path=str(args.benchmark_config),
     )
     return 0
 

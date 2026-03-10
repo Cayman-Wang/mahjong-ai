@@ -7,7 +7,10 @@ PY_BIN="${PY_BIN:-/usr/bin/python3}"
 RUN_TAG="smoke_$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${ROOT_DIR}/runs/${RUN_TAG}"
 RESUME_RUN_DIR="${ROOT_DIR}/runs/${RUN_TAG}_resume"
-CHECKPOINT_DIR="${RUN_DIR}/ppo_selfplay"
+TRAIN_CONFIG="${ROOT_DIR}/configs/train/ppo_selfplay_rllib_smoke.yaml"
+BENCHMARK_CONFIG="${ROOT_DIR}/configs/eval/smoke.yaml"
+EXPERIMENT_NAME="ppo_selfplay_smoke"
+CHECKPOINT_DIR="${RUN_DIR}/${EXPERIMENT_NAME}"
 
 echo "[smoke] root=${ROOT_DIR}"
 echo "[smoke] python=${PY_BIN}"
@@ -20,7 +23,7 @@ PYTHONPATH="${ROOT_DIR}/src" "${PY_BIN}" -m mahjong_ai.cli.main sim --games 5 --
 
 echo "[smoke] train 1 iter"
 PYTHONPATH="${ROOT_DIR}/src" "${PY_BIN}" -m mahjong_ai.cli.main train-rllib \
-  --config "${ROOT_DIR}/configs/train/ppo_selfplay_rllib.yaml" \
+  --config "${TRAIN_CONFIG}" \
   --num-iterations 1 \
   --checkpoint-every 1 \
   --eval-every 1 \
@@ -32,9 +35,14 @@ if [[ ! -f "${CHECKPOINT_DIR}/rllib_checkpoint.json" ]]; then
   exit 1
 fi
 
+echo "[smoke] benchmark first checkpoint"
+PYTHONPATH="${ROOT_DIR}/src" "${PY_BIN}" -m mahjong_ai.cli.main eval-benchmark \
+  --config "${BENCHMARK_CONFIG}" \
+  --checkpoint "${CHECKPOINT_DIR}"
+
 echo "[smoke] resume 1 iter"
 PYTHONPATH="${ROOT_DIR}/src" "${PY_BIN}" -m mahjong_ai.cli.main train-rllib \
-  --config "${ROOT_DIR}/configs/train/ppo_selfplay_rllib.yaml" \
+  --config "${TRAIN_CONFIG}" \
   --num-iterations 1 \
   --checkpoint-every 1 \
   --eval-every 1 \
