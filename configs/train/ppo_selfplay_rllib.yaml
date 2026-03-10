@@ -1,0 +1,51 @@
+experiment_name: ppo_selfplay
+seed: 1
+run_dir: runs
+num_iterations: 50
+checkpoint_every: 5
+
+# Keep defaults lightweight so a local first run can start quickly.
+rollout_workers: 0
+num_envs_per_worker: 1
+num_gpus: 0
+num_learners: 0
+num_gpus_per_learner: null
+num_cpus_per_learner: auto
+
+# PPO knobs (baseline values; tune later)
+train_batch_size: 4096
+sgd_minibatch_size: 512
+num_sgd_iter: 10
+lr: 0.0003
+clip_param: 0.2
+gamma: 0.99
+lambda: 0.95
+
+model:
+  hidden_sizes: [512, 512]
+
+warnings:
+  # Keep defaults unchanged: warnings are visible unless you explicitly mute them.
+  quiet_ray_future_warning: false
+  quiet_new_api_stack_warning: false
+  quiet_ray_deprecation_warning: false
+
+self_play:
+  enabled: true
+  opponent_pool_size: 4
+  snapshot_interval: 5
+  # For seats 1~3, sample main policy with this probability; otherwise sample from opponent pool.
+  main_policy_opponent_prob: 0.2
+  seat0_always_main: true
+
+evaluation:
+  eval_every: 5
+  eval_games: 20
+  baselines: [heuristic, random]
+  # Optional fixed seeds for benchmark reproducibility. When provided, length
+  # must equal eval_games.
+  seed_list: []
+  # Empty means reports are written to runs/<experiment>/eval/iter_xxxxxx.json.
+  output_path: ""
+  # true=fail fast on illegal eval actions; false=record illegal_action_rate and continue with fallback legal moves.
+  strict_illegal_action: true

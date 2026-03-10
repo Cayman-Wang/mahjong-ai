@@ -1,0 +1,8 @@
+# Placeholder evaluation config.
+seed: 1
+games: 200
+agents:
+  - heuristic
+  - random
+  - random
+  - random

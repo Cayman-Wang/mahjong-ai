@@ -1,0 +1,32 @@
+# Example profile for a future screen-vision integration.
+# Values are placeholders and must be calibrated per game/client.
+
+window:
+  title_contains: "Example Mahjong"
+
+roi:
+  hand_rect: [0, 0, 100, 100]
+  discards_rect: [0, 0, 100, 100]
+  melds_rect: [0, 0, 100, 100]
+  buttons_rect: [0, 0, 100, 100]
+
+hand_slots:
+  # coordinates for each of the 14 possible hand tile slots (x,y)
+  slots: []
+
+buttons:
+  hu: {template: ""}
+  peng: {template: ""}
+  gang: {template: ""}
+  pass: {template: ""}
+  dingque: {template: ""}
+  swap_confirm: {template: ""}
+
+timing:
+  click_delay_ms: 80
+  animation_buffer_ms: 200
+  max_retries: 2
+
+safety:
+  min_confidence: 0.9
+  pause_on_uncertainty: true

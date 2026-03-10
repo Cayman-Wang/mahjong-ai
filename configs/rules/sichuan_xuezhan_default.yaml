@@ -1,0 +1,41 @@
+# Default Sichuan Mahjong (Xuezhan Daodi) rules used by this project.
+# NOTE: Real-world apps vary a lot. Keep these knobs configurable.
+
+swap_enabled: true
+swap_direction: random   # random|clockwise|counterclockwise|across
+
+dingque_enabled: true
+
+allow_chi: false
+allow_yipao_duoxiang: true
+
+max_round_wins: 3
+
+base_points: 1
+fan_cap: 8
+allow_zero_fan: true
+
+# Dealer multiplier ("zhuang-xian" multiplier).
+enable_dealer_multiplier: true
+dealer_multiplier: 2
+
+dianpao_pays_all_alive: false  # true: discarder pays as if self-draw (multiplied by alive opponents)
+
+gang_ming_pay: 1
+gang_an_pay: 2
+gang_bu_pay: 1
+
+enable_hua_zhu: true
+hua_zhu_penalty: 16
+
+enable_cha_jiao: true
+cha_jiao_penalty: 8
+
+fan_patterns:
+  qidui: 2
+  qingyise: 2
+  pengpenghu: 2
+  gangshanghua: 1
+  qiangganghu: 1
+  haidilaoyue: 1
+  haidipao: 1
