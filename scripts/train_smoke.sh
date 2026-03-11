@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${PY_BIN:-}" ]]; then
+  PY_BIN="$(command -v python || true)"
+fi
 PY_BIN="${PY_BIN:-/usr/bin/python3}"
 
 RUN_TAG="smoke_$(date +%Y%m%d_%H%M%S)"
