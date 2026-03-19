@@ -54,3 +54,11 @@ evaluation:
   output_path: ""
   # true=fail fast on illegal eval actions; false=record illegal_action_rate and continue with fallback legal moves.
   strict_illegal_action: true
+  replay:
+    enabled: true
+    games_per_eval: 1
+    # Empty means runs/<experiment>/replays/iter_xxxxxx/
+    output_dir: ""
+    include_omniscient: true
+    seat_views: [0]
+    max_steps: 5000

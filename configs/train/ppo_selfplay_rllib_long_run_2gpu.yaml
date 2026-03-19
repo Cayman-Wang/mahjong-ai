@@ -1,0 +1,57 @@
+experiment_name: ppo_selfplay_long_run_2gpu
+seed: 1
+run_dir: runs
+num_iterations: 200
+checkpoint_every: 10
+
+# Keep two learner GPUs saturated with more sampler throughput than the
+# standard 2-GPU profile.
+rollout_workers: 8
+num_envs_per_worker: 2
+
+# RLlib new API stack: true multi-GPU training requires num_learners > 1.
+num_gpus: 0
+num_learners: 2
+num_gpus_per_learner: 1
+num_cpus_per_learner: 1
+# This host's 2x3090 topology does not support NCCL peer access, so force Gloo.
+torch_distributed_backend: gloo
+
+# Stronger long-run batch sizing. Total train batch 16384 => 8192 per learner.
+train_batch_size: 16384
+sgd_minibatch_size: 1024
+num_sgd_iter: 10
+lr: 0.0002
+clip_param: 0.2
+gamma: 0.99
+lambda: 0.95
+
+model:
+  hidden_sizes: [512, 512]
+
+warnings:
+  quiet_ray_future_warning: true
+  quiet_new_api_stack_warning: true
+  quiet_ray_deprecation_warning: true
+
+self_play:
+  enabled: true
+  opponent_pool_size: 8
+  snapshot_interval: 5
+  main_policy_opponent_prob: 0.1
+  seat0_always_main: true
+
+evaluation:
+  eval_every: 10
+  eval_games: 64
+  baselines: [heuristic, random]
+  seed_list: []
+  output_path: ""
+  strict_illegal_action: true
+  replay:
+    enabled: true
+    games_per_eval: 3
+    output_dir: ""
+    include_omniscient: true
+    seat_views: [0]
+    max_steps: 5000

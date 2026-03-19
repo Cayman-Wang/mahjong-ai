@@ -5,7 +5,7 @@ import sys
 import unittest
 from unittest import mock
 
-from mahjong_ai.cli.main import _parse_seed_list, build_parser, cmd_eval_benchmark
+from mahjong_ai.cli.main import _parse_seed_list, build_parser, cmd_eval_benchmark, cmd_replay_rllib
 from mahjong_ai.evaluation.benchmark_config import EvalBenchmarkConfig
 
 
@@ -47,6 +47,71 @@ class TestCliMain(unittest.TestCase):
         self.assertFalse(args.quiet_ray_future_warning)
         self.assertTrue(args.quiet_ray_deprecation_warning)
         self.assertFalse(args.strict_illegal_action)
+
+    def test_replay_rllib_parser_accepts_overrides(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "replay-rllib",
+            "--checkpoint",
+            "runs/ppo_selfplay",
+            "--games",
+            "2",
+            "--seed",
+            "101",
+            "--seed-list",
+            "101,102",
+            "--output",
+            "tmp/replays",
+            "--no-include-omniscient",
+            "--seat-views",
+            "0,2",
+            "--max-steps",
+            "800",
+            "--quiet-new-api-stack-warning",
+            "--quiet-ray-deprecation-warning",
+            "--no-strict-illegal-action",
+        ])
+        self.assertEqual(args.cmd, "replay-rllib")
+        self.assertEqual(args.checkpoint, "runs/ppo_selfplay")
+        self.assertEqual(args.games, 2)
+        self.assertEqual(args.seed, 101)
+        self.assertEqual(args.seed_list, "101,102")
+        self.assertEqual(args.output, "tmp/replays")
+        self.assertFalse(args.include_omniscient)
+        self.assertEqual(args.seat_views, "0,2")
+        self.assertEqual(args.max_steps, 800)
+        self.assertTrue(args.quiet_new_api_stack_warning)
+        self.assertTrue(args.quiet_ray_deprecation_warning)
+        self.assertFalse(args.strict_illegal_action)
+
+    def test_cmd_replay_rllib_uses_checkpoint_replay_entry(self) -> None:
+        args = argparse.Namespace(
+            checkpoint="runs/ppo_selfplay",
+            rules="",
+            games=2,
+            seed=101,
+            seed_list="101,102",
+            output="tmp/replays",
+            include_omniscient=False,
+            seat_views="0,2",
+            max_steps=900,
+            quiet_ray_future_warning=None,
+            quiet_new_api_stack_warning=True,
+            quiet_ray_deprecation_warning=False,
+            strict_illegal_action=None,
+        )
+
+        with mock.patch("mahjong_ai.training.rllib_runner.run_checkpoint_replay_entry") as mocked_replay:
+            rc = cmd_replay_rllib(args)
+
+        self.assertEqual(rc, 0)
+        mocked_replay.assert_called_once()
+        kwargs = mocked_replay.call_args.kwargs
+        self.assertEqual(kwargs["checkpoint_path"], "runs/ppo_selfplay")
+        self.assertEqual(kwargs["seed_list"], [101, 102])
+        self.assertEqual(kwargs["seat_views"], [0, 2])
+        self.assertFalse(kwargs["include_omniscient"])
+        self.assertEqual(kwargs["max_steps"], 900)
 
     def test_eval_benchmark_parser_accepts_config_and_checkpoint(self) -> None:
         parser = build_parser()

@@ -1,20 +1,23 @@
-experiment_name: ppo_selfplay_long_run
+experiment_name: ppo_selfplay_long_run_1gpu_parallel
 seed: 1
 run_dir: runs
-num_iterations: 100
+num_iterations: 200
 checkpoint_every: 10
 
-rollout_workers: 0
-num_envs_per_worker: 1
-num_gpus: 0
+# Stable long-run profile for a single local learner on one GPU with higher
+# sampler parallelism to keep the device busy.
+rollout_workers: 8
+num_envs_per_worker: 2
+
+num_gpus: 1
 num_learners: 0
 num_gpus_per_learner: null
 num_cpus_per_learner: auto
 
-train_batch_size: 8192
+train_batch_size: 16384
 sgd_minibatch_size: 1024
 num_sgd_iter: 10
-lr: 0.0003
+lr: 0.0002
 clip_param: 0.2
 gamma: 0.99
 lambda: 0.95
@@ -23,27 +26,27 @@ model:
   hidden_sizes: [512, 512]
 
 warnings:
-  quiet_ray_future_warning: false
-  quiet_new_api_stack_warning: false
-  quiet_ray_deprecation_warning: false
+  quiet_ray_future_warning: true
+  quiet_new_api_stack_warning: true
+  quiet_ray_deprecation_warning: true
 
 self_play:
   enabled: true
-  opponent_pool_size: 4
+  opponent_pool_size: 8
   snapshot_interval: 5
-  main_policy_opponent_prob: 0.2
+  main_policy_opponent_prob: 0.1
   seat0_always_main: true
 
 evaluation:
   eval_every: 10
-  eval_games: 48
+  eval_games: 64
   baselines: [heuristic, random]
   seed_list: []
   output_path: ""
   strict_illegal_action: true
   replay:
     enabled: true
-    games_per_eval: 1
+    games_per_eval: 3
     output_dir: ""
     include_omniscient: true
     seat_views: [0]

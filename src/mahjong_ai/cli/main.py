@@ -205,6 +205,32 @@ def cmd_eval_rllib(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_replay_rllib(args: argparse.Namespace) -> int:
+    from mahjong_ai.training.rllib_runner import run_checkpoint_replay_entry
+
+    seed_list = _parse_seed_list(args.seed_list)
+    seat_views = None
+    if args.seat_views is not None:
+        seat_views = [] if not args.seat_views.strip() else _parse_int_csv(args.seat_views)
+
+    run_checkpoint_replay_entry(
+        checkpoint_path=args.checkpoint,
+        rules_path=args.rules,
+        seed=args.seed,
+        games=args.games,
+        seed_list=seed_list,
+        output_dir=args.output,
+        include_omniscient=args.include_omniscient,
+        seat_views=seat_views,
+        max_steps=args.max_steps,
+        quiet_ray_future_warning=args.quiet_ray_future_warning,
+        quiet_new_api_stack_warning=args.quiet_new_api_stack_warning,
+        quiet_ray_deprecation_warning=args.quiet_ray_deprecation_warning,
+        strict_illegal_action=args.strict_illegal_action,
+    )
+    return 0
+
+
 def cmd_eval_benchmark(args: argparse.Namespace) -> int:
     from mahjong_ai.training.rllib_runner import run_evaluation_entry
 
@@ -340,6 +366,67 @@ def build_parser() -> argparse.ArgumentParser:
         help="raise immediately on illegal actions during evaluation",
     )
     eval_cmd.set_defaults(func=cmd_eval_rllib)
+
+    replay_cmd = sub.add_parser("replay-rllib", help="render self-play replay files from a local RLlib checkpoint")
+    replay_cmd.add_argument("--checkpoint", type=str, required=True, help="local checkpoint directory to replay")
+    replay_cmd.add_argument("--rules", type=str, default="", help="path to rules yaml/json (optional)")
+    replay_cmd.add_argument("--games", type=int, default=None, help="number of self-play games to replay")
+    replay_cmd.add_argument("--seed", type=int, default=None, help="base seed for replayed games")
+    replay_cmd.add_argument(
+        "--seed-list",
+        type=str,
+        default="",
+        help="comma-separated fixed seeds (length must equal effective --games)",
+    )
+    replay_cmd.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="optional output directory; defaults to <checkpoint>/replays_manual/<timestamp>",
+    )
+    replay_cmd.add_argument(
+        "--include-omniscient",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="write or skip omniscient replay files (defaults to checkpoint config)",
+    )
+    replay_cmd.add_argument(
+        "--seat-views",
+        type=str,
+        default=None,
+        help="comma-separated seat ids to export, e.g. 0,2 (defaults to checkpoint config)",
+    )
+    replay_cmd.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="max engine steps per replay game (defaults to checkpoint config)",
+    )
+    replay_cmd.add_argument(
+        "--quiet-ray-future-warning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="mute or keep Ray accelerator override FutureWarning (defaults to checkpoint config)",
+    )
+    replay_cmd.add_argument(
+        "--quiet-new-api-stack-warning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="mute or keep RLlib new API stack startup warning (defaults to checkpoint config)",
+    )
+    replay_cmd.add_argument(
+        "--quiet-ray-deprecation-warning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="mute or keep Ray deprecation warnings (defaults to checkpoint config)",
+    )
+    replay_cmd.add_argument(
+        "--strict-illegal-action",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="raise immediately on illegal replay actions (defaults to checkpoint config)",
+    )
+    replay_cmd.set_defaults(func=cmd_replay_rllib)
 
     eval_bench_cmd = sub.add_parser(
         "eval-benchmark",

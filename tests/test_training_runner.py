@@ -8,6 +8,7 @@ import tempfile
 import warnings
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from mahjong_ai.core.engine import GameEngine
@@ -28,6 +29,51 @@ class TestTrainingRunner(unittest.TestCase):
             cfg = load_train_config(p)
             self.assertEqual(cfg["seed"], 7)
             self.assertEqual(cfg["num_iterations"], 2)
+
+    def test_load_long_run_2gpu_template(self) -> None:
+        if not _has_mod("yaml"):
+            self.skipTest("PyYAML is not installed")
+
+        cfg = load_train_config("configs/train/ppo_selfplay_rllib_long_run_2gpu.yaml")
+        resolved = rllib_runner._resolve_train_config(cfg)
+
+        self.assertEqual(resolved["experiment_name"], "ppo_selfplay_long_run_2gpu")
+        self.assertEqual(resolved["num_iterations"], 200)
+        self.assertEqual(resolved["checkpoint_every"], 10)
+        self.assertEqual(resolved["rollout_workers"], 8)
+        self.assertEqual(resolved["num_envs_per_worker"], 2)
+        self.assertEqual(resolved["num_learners"], 2)
+        self.assertEqual(resolved["num_gpus_per_learner"], 1.0)
+        self.assertEqual(resolved["torch_distributed_backend"], "gloo")
+        self.assertEqual(resolved["train_batch_size"], 16384)
+        self.assertEqual(resolved["sgd_minibatch_size"], 1024)
+        self.assertAlmostEqual(resolved["lr"], 0.0002)
+        self.assertTrue(resolved["warnings"]["quiet_ray_future_warning"])
+        self.assertTrue(resolved["warnings"]["quiet_new_api_stack_warning"])
+        self.assertTrue(resolved["warnings"]["quiet_ray_deprecation_warning"])
+        self.assertEqual(resolved["self_play"]["opponent_pool_size"], 8)
+        self.assertAlmostEqual(resolved["self_play"]["main_policy_opponent_prob"], 0.1)
+        self.assertEqual(resolved["evaluation"]["eval_games"], 64)
+        self.assertEqual(resolved["evaluation"]["replay"]["games_per_eval"], 3)
+
+    def test_load_long_run_1gpu_parallel_template(self) -> None:
+        if not _has_mod("yaml"):
+            self.skipTest("PyYAML is not installed")
+
+        cfg = load_train_config("configs/train/ppo_selfplay_rllib_long_run_1gpu_parallel.yaml")
+        resolved = rllib_runner._resolve_train_config(cfg)
+
+        self.assertEqual(resolved["experiment_name"], "ppo_selfplay_long_run_1gpu_parallel")
+        self.assertEqual(resolved["num_iterations"], 200)
+        self.assertEqual(resolved["rollout_workers"], 8)
+        self.assertEqual(resolved["num_envs_per_worker"], 2)
+        self.assertEqual(resolved["num_gpus"], 1)
+        self.assertEqual(resolved["num_learners"], 0)
+        self.assertEqual(resolved["num_gpus_per_learner"], 1.0)
+        self.assertEqual(resolved["train_batch_size"], 16384)
+        self.assertEqual(resolved["self_play"]["opponent_pool_size"], 8)
+        self.assertEqual(resolved["evaluation"]["eval_games"], 64)
+        self.assertEqual(resolved["evaluation"]["replay"]["games_per_eval"], 3)
 
     def test_train_with_rllib_missing_deps_has_clear_message(self) -> None:
         if _has_mod("ray") and _has_mod("torch") and _has_mod("numpy") and _has_mod("gymnasium"):
@@ -67,6 +113,14 @@ class TestTrainingRunner(unittest.TestCase):
         self.assertEqual(cfg["num_learners"], 0)
         self.assertEqual(cfg["num_gpus_per_learner"], 1.0)
 
+    def test_resolve_train_config_accepts_torch_distributed_backend(self) -> None:
+        cfg = rllib_runner._resolve_train_config({"torch_distributed_backend": "GLOO"})
+        self.assertEqual(cfg["torch_distributed_backend"], "gloo")
+
+    def test_resolve_train_config_rejects_invalid_torch_distributed_backend(self) -> None:
+        with self.assertRaisesRegex(ValueError, "torch_distributed_backend"):
+            rllib_runner._resolve_train_config({"torch_distributed_backend": "mpi"})
+
     def test_resolve_train_config_accepts_eval_seed_list(self) -> None:
         cfg = rllib_runner._resolve_train_config(
             {
@@ -85,6 +139,41 @@ class TestTrainingRunner(unittest.TestCase):
                     "evaluation": {
                         "eval_games": 2,
                         "seed_list": [101],
+                    }
+                }
+            )
+
+    def test_resolve_train_config_parses_replay_block(self) -> None:
+        cfg = rllib_runner._resolve_train_config(
+            {
+                "evaluation": {
+                    "replay": {
+                        "enabled": "true",
+                        "games_per_eval": 2,
+                        "output_dir": "artifacts/replays",
+                        "include_omniscient": "false",
+                        "seat_views": [0, 2, 2],
+                        "max_steps": 123,
+                    }
+                }
+            }
+        )
+        replay_cfg = cfg["evaluation"]["replay"]
+        self.assertTrue(replay_cfg["enabled"])
+        self.assertEqual(replay_cfg["games_per_eval"], 2)
+        self.assertEqual(replay_cfg["output_dir"], "artifacts/replays")
+        self.assertFalse(replay_cfg["include_omniscient"])
+        self.assertEqual(replay_cfg["seat_views"], [0, 2])
+        self.assertEqual(replay_cfg["max_steps"], 123)
+
+    def test_resolve_train_config_rejects_invalid_replay_seat_view(self) -> None:
+        with self.assertRaisesRegex(ValueError, "seat_views"):
+            rllib_runner._resolve_train_config(
+                {
+                    "evaluation": {
+                        "replay": {
+                            "seat_views": [4],
+                        }
                     }
                 }
             )
@@ -128,6 +217,36 @@ class TestTrainingRunner(unittest.TestCase):
         self.assertEqual(call_kwargs["benchmark_name"], "smoke")
         self.assertEqual(call_kwargs["benchmark_config_path"], "configs/eval/smoke.yaml")
 
+    def test_run_checkpoint_replay_entry_passes_values(self) -> None:
+        with mock.patch("mahjong_ai.training.rllib_runner.replay_checkpoint_with_rllib") as mocked_replay:
+            rllib_runner.run_checkpoint_replay_entry(
+                checkpoint_path="runs/ppo_selfplay",
+                rules_path="",
+                seed=11,
+                games=2,
+                seed_list=[11, 12],
+                output_dir="runs/replays_manual",
+                include_omniscient=False,
+                seat_views=[0, 2],
+                max_steps=800,
+                quiet_ray_future_warning=True,
+                quiet_new_api_stack_warning=False,
+                quiet_ray_deprecation_warning=True,
+                strict_illegal_action=False,
+            )
+
+        mocked_replay.assert_called_once()
+        call_kwargs = mocked_replay.call_args.kwargs
+        self.assertEqual(call_kwargs["checkpoint_path"], "runs/ppo_selfplay")
+        self.assertEqual(call_kwargs["seed"], 11)
+        self.assertEqual(call_kwargs["games"], 2)
+        self.assertEqual(call_kwargs["seed_list"], [11, 12])
+        self.assertEqual(call_kwargs["output_dir"], "runs/replays_manual")
+        self.assertFalse(call_kwargs["include_omniscient"])
+        self.assertEqual(call_kwargs["seat_views"], [0, 2])
+        self.assertEqual(call_kwargs["max_steps"], 800)
+        self.assertFalse(call_kwargs["strict_illegal_action"])
+
     def test_build_rules_metadata_includes_path_and_config(self) -> None:
         metadata = rllib_runner._build_rules_metadata(
             rules=RulesConfig(),
@@ -155,6 +274,43 @@ class TestTrainingRunner(unittest.TestCase):
         path_for_restore, display_path = rllib_runner._normalize_resume_from("s3://bucket/checkpoint")
         self.assertEqual(path_for_restore, "s3://bucket/checkpoint")
         self.assertEqual(display_path, "s3://bucket/checkpoint")
+
+    def test_resolve_local_checkpoint_dir_rejects_remote_uri(self) -> None:
+        with self.assertRaisesRegex(ValueError, "local checkpoint directory"):
+            rllib_runner._resolve_local_checkpoint_dir("s3://bucket/checkpoint")
+
+    def test_load_checkpoint_resolved_config_requires_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(FileNotFoundError, "resolved_config.json"):
+                rllib_runner._load_checkpoint_resolved_config(Path(td))
+
+    def test_load_checkpoint_resolved_config_reads_and_normalizes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            checkpoint_dir = Path(td)
+            (checkpoint_dir / "resolved_config.json").write_text(
+                json.dumps(
+                    {
+                        "seed": 123,
+                        "evaluation": {
+                            "strict_illegal_action": False,
+                            "replay": {
+                                "games_per_eval": 2,
+                                "include_omniscient": False,
+                                "seat_views": [1, 3],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cfg = rllib_runner._load_checkpoint_resolved_config(checkpoint_dir)
+
+        self.assertEqual(cfg["seed"], 123)
+        self.assertFalse(cfg["evaluation"]["strict_illegal_action"])
+        self.assertEqual(cfg["evaluation"]["replay"]["games_per_eval"], 2)
+        self.assertFalse(cfg["evaluation"]["replay"]["include_omniscient"])
+        self.assertEqual(cfg["evaluation"]["replay"]["seat_views"], [1, 3])
 
     def test_extract_checkpoint_env_name(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -248,6 +404,243 @@ class TestTrainingRunner(unittest.TestCase):
             )
             self.assertEqual(path, exp_dir / "reports" / "custom.json")
             self.assertTrue(path.parent.exists())
+
+    def test_resolve_manual_replay_output_dir_default_under_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            checkpoint_dir = Path(td)
+            path = rllib_runner._resolve_manual_replay_output_dir(
+                checkpoint_dir=checkpoint_dir,
+                output_dir="",
+                output_dir_source="default",
+            )
+            self.assertEqual(path.parent, checkpoint_dir / "replays_manual")
+            self.assertTrue(path.exists())
+
+    def test_resolve_manual_replay_output_dir_uses_checkpoint_relative_config_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            checkpoint_dir = Path(td)
+            path = rllib_runner._resolve_manual_replay_output_dir(
+                checkpoint_dir=checkpoint_dir,
+                output_dir="custom/replays",
+                output_dir_source="config",
+            )
+            self.assertEqual(path, checkpoint_dir / "custom" / "replays")
+            self.assertTrue(path.exists())
+
+    def test_resolve_checkpoint_replay_request_prefers_cli_over_checkpoint_config(self) -> None:
+        request = rllib_runner._resolve_checkpoint_replay_request(
+            checkpoint_config={
+                "seed": 7,
+                "warnings": {
+                    "quiet_ray_future_warning": False,
+                    "quiet_new_api_stack_warning": False,
+                    "quiet_ray_deprecation_warning": False,
+                },
+                "evaluation": {
+                    "strict_illegal_action": True,
+                    "replay": {
+                        "games_per_eval": 1,
+                        "output_dir": "cfg/replays",
+                        "include_omniscient": True,
+                        "seat_views": [0],
+                        "max_steps": 500,
+                    },
+                },
+            },
+            games=2,
+            seed=101,
+            seed_list=[101, 102],
+            output_dir="cli/replays",
+            include_omniscient=False,
+            seat_views=[2, 3],
+            max_steps=900,
+            strict_illegal_action=False,
+            quiet_ray_future_warning=True,
+            quiet_new_api_stack_warning=True,
+            quiet_ray_deprecation_warning=True,
+        )
+
+        self.assertEqual(request["games"], 2)
+        self.assertEqual(request["seed"], 101)
+        self.assertEqual(request["eval_seeds"], [101, 102])
+        self.assertEqual(request["output_dir"], "cli/replays")
+        self.assertEqual(request["output_dir_source"], "cli")
+        self.assertFalse(request["include_omniscient"])
+        self.assertEqual(request["seat_views"], [2, 3])
+        self.assertEqual(request["max_steps"], 900)
+        self.assertFalse(request["strict_illegal_action"])
+        self.assertTrue(request["quiet_ray_future_warning"])
+        self.assertTrue(request["quiet_new_api_stack_warning"])
+        self.assertTrue(request["quiet_ray_deprecation_warning"])
+
+    def test_resolve_checkpoint_replay_request_uses_checkpoint_defaults(self) -> None:
+        request = rllib_runner._resolve_checkpoint_replay_request(
+            checkpoint_config={
+                "seed": 17,
+                "warnings": {
+                    "quiet_ray_future_warning": True,
+                    "quiet_new_api_stack_warning": False,
+                    "quiet_ray_deprecation_warning": True,
+                },
+                "evaluation": {
+                    "strict_illegal_action": False,
+                    "replay": {
+                        "games_per_eval": 2,
+                        "output_dir": "cfg/replays",
+                        "include_omniscient": False,
+                        "seat_views": [1, 3],
+                        "max_steps": 700,
+                    },
+                },
+            },
+            games=None,
+            seed=None,
+            seed_list=None,
+            output_dir=None,
+            include_omniscient=None,
+            seat_views=None,
+            max_steps=None,
+            strict_illegal_action=None,
+            quiet_ray_future_warning=None,
+            quiet_new_api_stack_warning=None,
+            quiet_ray_deprecation_warning=None,
+        )
+
+        self.assertEqual(request["games"], 2)
+        self.assertEqual(request["seed"], 17)
+        self.assertEqual(request["eval_seeds"], [17, 18])
+        self.assertEqual(request["output_dir"], "cfg/replays")
+        self.assertEqual(request["output_dir_source"], "config")
+        self.assertFalse(request["include_omniscient"])
+        self.assertEqual(request["seat_views"], [1, 3])
+        self.assertEqual(request["max_steps"], 700)
+        self.assertFalse(request["strict_illegal_action"])
+        self.assertTrue(request["quiet_ray_future_warning"])
+        self.assertFalse(request["quiet_new_api_stack_warning"])
+        self.assertTrue(request["quiet_ray_deprecation_warning"])
+
+    def test_resolve_checkpoint_replay_request_requires_at_least_one_view(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one replay view"):
+            rllib_runner._resolve_checkpoint_replay_request(
+                checkpoint_config={
+                    "evaluation": {
+                        "replay": {
+                            "include_omniscient": False,
+                            "seat_views": [],
+                        },
+                    },
+                },
+                games=None,
+                seed=None,
+                seed_list=None,
+                output_dir=None,
+                include_omniscient=None,
+                seat_views=None,
+                max_steps=None,
+                strict_illegal_action=None,
+                quiet_ray_future_warning=None,
+                quiet_new_api_stack_warning=None,
+                quiet_ray_deprecation_warning=None,
+            )
+
+    def test_patch_torch_adam_for_resume_sets_foreach_false_once(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class FakeAdam:
+            def __init__(self, params, *args, **kwargs):
+                del params, args
+                calls.append(dict(kwargs))
+
+        fake_torch = SimpleNamespace(optim=SimpleNamespace(Adam=FakeAdam))
+
+        patched = rllib_runner._patch_torch_adam_for_resume(fake_torch)
+        self.assertTrue(patched)
+
+        fake_torch.optim.Adam([1], lr=3e-4)
+        self.assertEqual(calls[0]["lr"], 3e-4)
+        self.assertFalse(calls[0]["foreach"])
+
+        patched_again = rllib_runner._patch_torch_adam_for_resume(fake_torch)
+        self.assertFalse(patched_again)
+
+    def test_sanitize_torch_optimizer_converts_tensor_like_hparams(self) -> None:
+        class _Scalar:
+            def __init__(self, value):
+                self.value = value
+
+            def item(self):
+                return self.value
+
+        param_marker = object()
+        optimizer = SimpleNamespace(
+            defaults={
+                "lr": _Scalar(3e-4),
+                "betas": (_Scalar(0.9), _Scalar(0.999)),
+                "eps": _Scalar(1e-8),
+                "weight_decay": _Scalar(0.0),
+                "amsgrad": _Scalar(False),
+                "maximize": _Scalar(False),
+                "foreach": None,
+                "capturable": _Scalar(False),
+                "differentiable": _Scalar(False),
+                "fused": None,
+                "decoupled_weight_decay": _Scalar(False),
+            },
+            param_groups=[
+                {
+                    "lr": _Scalar(3e-4),
+                    "betas": (_Scalar(0.9), _Scalar(0.999)),
+                    "eps": _Scalar(1e-8),
+                    "weight_decay": _Scalar(0.0),
+                    "amsgrad": _Scalar(False),
+                    "maximize": _Scalar(False),
+                    "foreach": None,
+                    "capturable": _Scalar(False),
+                    "differentiable": _Scalar(False),
+                    "fused": None,
+                    "decoupled_weight_decay": _Scalar(False),
+                    "params": [param_marker],
+                }
+            ],
+        )
+
+        sanitized_groups = rllib_runner._sanitize_torch_optimizer(optimizer)
+
+        self.assertEqual(sanitized_groups, 1)
+        self.assertEqual(optimizer.defaults["betas"], (0.9, 0.999))
+        self.assertEqual(optimizer.param_groups[0]["betas"], (0.9, 0.999))
+        self.assertEqual(optimizer.param_groups[0]["lr"], 3e-4)
+        self.assertFalse(optimizer.param_groups[0]["foreach"])
+        self.assertIsNone(optimizer.param_groups[0]["fused"])
+        self.assertEqual(optimizer.param_groups[0]["params"], [param_marker])
+
+    def test_sanitize_resumed_algorithm_optimizers_uses_learner_group(self) -> None:
+        optimizer = SimpleNamespace(
+            defaults={"foreach": None, "betas": (0.9, 0.999)},
+            param_groups=[{"foreach": None, "betas": (0.9, 0.999), "params": []}],
+        )
+        learner = SimpleNamespace(_named_optimizers={"default": optimizer})
+
+        class _Result:
+            ok = True
+
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class _LearnerGroup:
+            def foreach_learner(self, func, **kwargs):
+                del kwargs
+                return [_Result(func(learner))]
+
+        sanitized_groups = rllib_runner._sanitize_resumed_algorithm_optimizers(
+            SimpleNamespace(learner_group=_LearnerGroup())
+        )
+
+        self.assertEqual(sanitized_groups, 1)
+        self.assertFalse(optimizer.param_groups[0]["foreach"])
 
     def test_install_ray_warning_filters_suppresses_logger_deprecations(self) -> None:
         with warnings.catch_warnings(record=True) as records:
@@ -623,6 +1016,147 @@ class TestTrainingRunner(unittest.TestCase):
                 )
 
         self.assertEqual(fake_algo.restore_path, 's3://bucket/checkpoint')
+        self.assertEqual(fake_algo.save_calls, 1)
+        self.assertTrue(fake_algo.stop_called)
+        self.assertTrue(fake_ray.shutdown_called)
+
+    def test_train_with_rllib_eval_report_includes_replay_files(self) -> None:
+        class _FakeRay:
+            def __init__(self):
+                self.shutdown_called = False
+
+            def is_initialized(self):
+                return False
+
+            def init(self, **kwargs):
+                del kwargs
+
+            def shutdown(self):
+                self.shutdown_called = True
+
+        class _FakePPOConfig:
+            def environment(self, **kwargs):
+                del kwargs
+                return self
+
+            def framework(self, *args, **kwargs):
+                del args, kwargs
+                return self
+
+            def resources(self, **kwargs):
+                del kwargs
+                return self
+
+            def learners(self, **kwargs):
+                del kwargs
+                return self
+
+            def env_runners(self, **kwargs):
+                del kwargs
+                return self
+
+            def training(self, **kwargs):
+                del kwargs
+                return self
+
+            def rl_module(self, **kwargs):
+                del kwargs
+                return self
+
+            def multi_agent(self, **kwargs):
+                del kwargs
+                return self
+
+            def debugging(self, **kwargs):
+                del kwargs
+                return self
+
+        class _FakeSpec:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+        class _FakeColumns:
+            pass
+
+        class _FakeAlgo:
+            def __init__(self):
+                self.stop_called = False
+                self.save_calls = 0
+
+            def train(self):
+                return {"episode_reward_mean": 0.0, "num_env_steps_sampled_lifetime": 1}
+
+            def save(self, checkpoint_dir):
+                self.save_calls += 1
+                return checkpoint_dir
+
+            def stop(self):
+                self.stop_called = True
+
+        fake_ray = _FakeRay()
+        fake_algo = _FakeAlgo()
+        fake_rllib_tuple = (
+            fake_ray,
+            object(),
+            _FakePPOConfig,
+            _FakeColumns,
+            _FakeSpec,
+            _FakeSpec,
+            _FakeSpec,
+            lambda *args, **kwargs: None,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            replay_files = [
+                str(Path(td) / "seed_1001_omniscient.txt"),
+                str(Path(td) / "seed_1001_seat0.txt"),
+            ]
+            cfg = {
+                "run_dir": str(run_dir),
+                "experiment_name": "replay_eval",
+                "num_iterations": 1,
+                "checkpoint_every": 1,
+                "self_play": {
+                    "enabled": False,
+                },
+                "evaluation": {
+                    "eval_every": 1,
+                    "eval_games": 1,
+                    "baselines": ["heuristic"],
+                    "replay": {
+                        "enabled": True,
+                        "games_per_eval": 1,
+                    },
+                },
+            }
+            with mock.patch("mahjong_ai.training.rllib_runner._require_rllib", return_value=fake_rllib_tuple), mock.patch(
+                "mahjong_ai.training.rllib_runner._build_algorithm",
+                return_value=fake_algo,
+            ), mock.patch(
+                "mahjong_ai.training.rllib_runner._evaluate_policy_vs_baseline",
+                return_value={
+                    "avg_score": 0.0,
+                    "score_std": 0.0,
+                    "win_rate": 0.0,
+                    "avg_steps": 1.0,
+                    "illegal_action_rate": 0.0,
+                },
+            ), mock.patch(
+                "mahjong_ai.training.rllib_runner._generate_training_self_play_replays",
+                return_value=replay_files,
+            ) as mocked_replays, mock.patch("builtins.print"):
+                train_with_rllib(
+                    engine=GameEngine(rules=RulesConfig(), enable_events=False),
+                    config=cfg,
+                )
+
+            report_path = run_dir / "replay_eval" / "eval" / "iter_000001.json"
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["replay"]["files"], replay_files)
+            self.assertTrue(payload["replay"]["enabled"])
+            mocked_replays.assert_called_once()
+
         self.assertEqual(fake_algo.save_calls, 1)
         self.assertTrue(fake_algo.stop_called)
         self.assertTrue(fake_ray.shutdown_called)

@@ -1,18 +1,25 @@
-experiment_name: ppo_selfplay_long_run
+experiment_name: ppo_selfplay_standard_2gpu
 seed: 1
 run_dir: runs
-num_iterations: 100
-checkpoint_every: 10
+num_iterations: 20
+checkpoint_every: 5
 
-rollout_workers: 0
-num_envs_per_worker: 1
+# Increase sampling parallelism so two learner GPUs are less likely to idle
+# behind a single local env runner.
+rollout_workers: 6
+num_envs_per_worker: 2
+
+# RLlib new API stack: true multi-GPU training requires num_learners > 1.
+# Keep the driver on CPU and assign one GPU to each remote learner.
 num_gpus: 0
-num_learners: 0
-num_gpus_per_learner: null
-num_cpus_per_learner: auto
+num_learners: 2
+num_gpus_per_learner: 1
+num_cpus_per_learner: 1
 
+# Keep the effective batch per learner close to the single-GPU standard run:
+# total train batch 8192 => 4096 per learner when num_learners=2.
 train_batch_size: 8192
-sgd_minibatch_size: 1024
+sgd_minibatch_size: 512
 num_sgd_iter: 10
 lr: 0.0003
 clip_param: 0.2
@@ -35,8 +42,8 @@ self_play:
   seat0_always_main: true
 
 evaluation:
-  eval_every: 10
-  eval_games: 48
+  eval_every: 5
+  eval_games: 16
   baselines: [heuristic, random]
   seed_list: []
   output_path: ""

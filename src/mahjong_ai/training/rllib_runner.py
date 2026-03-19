@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import hashlib
 import json
@@ -22,6 +23,11 @@ from mahjong_ai.env.rllib_multiagent_env import RllibMahjongEnv
 from mahjong_ai.rules.loader import load_rules
 from mahjong_ai.rules.schema import RulesConfig
 from mahjong_ai.training.rllib_action_mask_rl_module import MahjongActionMaskTorchRLModule
+from mahjong_ai.training.self_play_replay import (
+    _ReplayEpisodeRef,
+    build_self_play_replay_trace,
+    write_replay_artifacts,
+)
 
 SHARED_POLICY_ID = "shared_policy"
 EVAL_REPORT_SCHEMA_VERSION = 2
@@ -54,6 +60,7 @@ DEFAULT_TRAIN_CONFIG: dict[str, Any] = {
     "num_learners": 0,
     "num_gpus_per_learner": None,
     "num_cpus_per_learner": "auto",
+    "torch_distributed_backend": "",
     "model": {"hidden_sizes": [512, 512]},
     "evaluation": {
         "eval_every": 5,
@@ -64,6 +71,15 @@ DEFAULT_TRAIN_CONFIG: dict[str, Any] = {
         "output_path": "",
         # Strict mode raises on first illegal action during evaluation.
         "strict_illegal_action": True,
+        "replay": {
+            "enabled": True,
+            "games_per_eval": 1,
+            # Empty means: write to runs/<experiment>/replays/iter_xxxxxx/.
+            "output_dir": "",
+            "include_omniscient": True,
+            "seat_views": [0],
+            "max_steps": 5000,
+        },
     },
     "warnings": {
         # Keep default behavior unchanged: these warnings are shown unless muted.
@@ -141,6 +157,22 @@ def _as_bool(value: Any, *, name: str) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _normalize_replay_seat_views(seat_views_raw: list[Any] | None, *, name: str) -> list[int]:
+    if seat_views_raw is None:
+        return []
+    if not isinstance(seat_views_raw, list):
+        raise ValueError(f"{name} must be a list of seat ids")
+
+    seat_views: list[int] = []
+    for seat in seat_views_raw:
+        seat_id = int(seat)
+        if seat_id < 0 or seat_id >= 4:
+            raise ValueError(f"{name} entries must be in [0, 3]")
+        if seat_id not in seat_views:
+            seat_views.append(seat_id)
+    return seat_views
+
+
 def _resolve_train_config(config: dict[str, Any]) -> dict[str, Any]:
     cfg = _deep_merge(DEFAULT_TRAIN_CONFIG, config)
     cfg["experiment_name"] = str(cfg["experiment_name"])
@@ -174,6 +206,12 @@ def _resolve_train_config(config: dict[str, Any]) -> dict[str, Any]:
     else:
         cfg["num_cpus_per_learner"] = float(cpus_per_learner)
 
+    backend_raw = cfg.get("torch_distributed_backend", "") or ""
+    backend = str(backend_raw).strip().lower()
+    if backend and backend not in {"nccl", "gloo"}:
+        raise ValueError("torch_distributed_backend must be '', 'nccl', or 'gloo'")
+    cfg["torch_distributed_backend"] = backend
+
     cfg.setdefault("model", {})
     cfg.setdefault("evaluation", {})
     cfg.setdefault("warnings", {})
@@ -189,6 +227,28 @@ def _resolve_train_config(config: dict[str, Any]) -> dict[str, Any]:
         eval_cfg.get("strict_illegal_action", True),
         name="evaluation.strict_illegal_action",
     )
+    replay_cfg = eval_cfg.get("replay", {})
+    if replay_cfg is None:
+        replay_cfg = {}
+    if not isinstance(replay_cfg, dict):
+        raise ValueError("evaluation.replay must be a mapping")
+    replay_cfg["enabled"] = _as_bool(
+        replay_cfg.get("enabled", True),
+        name="evaluation.replay.enabled",
+    )
+    replay_cfg["games_per_eval"] = int(replay_cfg.get("games_per_eval", 1))
+    replay_cfg["output_dir"] = str(replay_cfg.get("output_dir", "") or "")
+    replay_cfg["include_omniscient"] = _as_bool(
+        replay_cfg.get("include_omniscient", True),
+        name="evaluation.replay.include_omniscient",
+    )
+    seat_views_raw = replay_cfg.get("seat_views", [0])
+    replay_cfg["seat_views"] = _normalize_replay_seat_views(
+        seat_views_raw,
+        name="evaluation.replay.seat_views",
+    )
+    replay_cfg["max_steps"] = int(replay_cfg.get("max_steps", 5000))
+    eval_cfg["replay"] = replay_cfg
 
     baselines_raw = eval_cfg.get("baselines", ["heuristic", "random"])
     if not isinstance(baselines_raw, list) or not baselines_raw:
@@ -243,6 +303,10 @@ def _resolve_train_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("evaluation.eval_every must be >= 0")
     if eval_cfg["eval_games"] <= 0:
         raise ValueError("evaluation.eval_games must be positive")
+    if replay_cfg["games_per_eval"] <= 0:
+        raise ValueError("evaluation.replay.games_per_eval must be positive")
+    if replay_cfg["max_steps"] <= 0:
+        raise ValueError("evaluation.replay.max_steps must be positive")
 
     if self_play_cfg["opponent_pool_size"] < 0:
         raise ValueError("self_play.opponent_pool_size must be >= 0")
@@ -348,6 +412,59 @@ def _apply_runtime_warning_controls(
     _install_ray_warning_filters(quiet=quiet_ray_deprecation_warning)
 
 
+def _maybe_load_checkpoint_runtime_config(checkpoint_path: str) -> dict[str, Any] | None:
+    if "://" in checkpoint_path:
+        return None
+
+    checkpoint_dir = Path(checkpoint_path).expanduser().resolve()
+    if not checkpoint_dir.exists() or not checkpoint_dir.is_dir():
+        return None
+
+    candidates = (
+        checkpoint_dir / "resolved_config.json",
+        checkpoint_dir.parent / "resolved_config.json",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return _resolve_train_config(load_train_config(candidate))
+    return None
+
+
+@contextlib.contextmanager
+def _override_rllib_torch_distributed_backend(backend: str):
+    if not backend:
+        yield
+        return
+
+    try:
+        import ray.rllib.core.learner.learner_group as learner_group  # type: ignore
+        from ray.train.torch.config import TorchConfig, _TorchBackend  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("failed to configure RLlib torch distributed backend override") from e
+
+    original_get_backend_config = learner_group._get_backend_config
+
+    def _patched_get_backend_config(learner_class: Any):
+        if getattr(learner_class, "framework", None) != "torch":
+            return original_get_backend_config(learner_class)
+
+        class _RLlibTorchBackend(_TorchBackend):
+            share_cuda_visible_devices = False
+
+        class RLlibTorchConfig(TorchConfig):
+            @property
+            def backend_cls(self):
+                return _RLlibTorchBackend
+
+        return RLlibTorchConfig(backend=backend)
+
+    learner_group._get_backend_config = _patched_get_backend_config
+    try:
+        yield
+    finally:
+        learner_group._get_backend_config = original_get_backend_config
+
+
 def _build_algorithm(algo_config: Any):
     """Build an RLlib Algorithm while keeping Ray-version compatibility."""
 
@@ -368,6 +485,112 @@ def _build_algorithm(algo_config: Any):
     raise RuntimeError("PPOConfig has no supported build method")
 
 
+def _patch_torch_adam_for_resume(torch_module: Any) -> bool:
+    """Force Adam(foreach=False) for resumed runs to avoid Torch restore issues."""
+
+    adam_cls = getattr(getattr(torch_module, "optim", None), "Adam", None)
+    if adam_cls is None:
+        return False
+    if getattr(adam_cls, "_mahjong_resume_foreach_disabled", False):
+        return False
+
+    class _AdamResumeSafe(adam_cls):
+        _mahjong_resume_foreach_disabled = True
+
+        def __init__(self, params, *args, **kwargs):
+            kwargs.setdefault("foreach", False)
+            super().__init__(params, *args, **kwargs)
+
+    torch_module.optim.Adam = _AdamResumeSafe
+    return True
+
+
+def _python_scalar(value: Any) -> Any:
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return value
+    return value
+
+
+def _sanitize_optimizer_hparams(hparams: dict[str, Any]) -> None:
+    float_keys = ("lr", "eps", "weight_decay", "initial_lr")
+    bool_keys = (
+        "amsgrad",
+        "maximize",
+        "capturable",
+        "differentiable",
+        "decoupled_weight_decay",
+    )
+
+    for key in float_keys:
+        if key in hparams and hparams[key] is not None:
+            hparams[key] = float(_python_scalar(hparams[key]))
+
+    if "betas" in hparams and hparams["betas"] is not None:
+        hparams["betas"] = tuple(float(_python_scalar(beta)) for beta in hparams["betas"])
+
+    for key in bool_keys:
+        if key in hparams and hparams[key] is not None:
+            hparams[key] = bool(_python_scalar(hparams[key]))
+
+    if "fused" in hparams and hparams["fused"] is not None:
+        hparams["fused"] = bool(_python_scalar(hparams["fused"]))
+
+    if "foreach" in hparams:
+        hparams["foreach"] = False
+
+
+def _sanitize_torch_optimizer(optimizer: Any) -> int:
+    defaults = getattr(optimizer, "defaults", None)
+    if isinstance(defaults, dict):
+        _sanitize_optimizer_hparams(defaults)
+
+    param_groups = getattr(optimizer, "param_groups", None)
+    if not isinstance(param_groups, list):
+        return 0
+
+    sanitized_groups = 0
+    for group in param_groups:
+        if isinstance(group, dict):
+            _sanitize_optimizer_hparams(group)
+            sanitized_groups += 1
+    return sanitized_groups
+
+
+def _sanitize_resumed_learner_optimizers(learner: Any) -> int:
+    named_optimizers = getattr(learner, "_named_optimizers", None)
+    if not isinstance(named_optimizers, dict):
+        return 0
+
+    sanitized_groups = 0
+    for optimizer in named_optimizers.values():
+        sanitized_groups += _sanitize_torch_optimizer(optimizer)
+    return sanitized_groups
+
+
+def _sanitize_resumed_algorithm_optimizers(algorithm: Any) -> int:
+    learner_group = getattr(algorithm, "learner_group", None)
+    if learner_group is None:
+        return 0
+
+    foreach_learner = getattr(learner_group, "foreach_learner", None)
+    if callable(foreach_learner):
+        results = foreach_learner(_sanitize_resumed_learner_optimizers)
+        sanitized_groups = 0
+        for result in results:
+            if not result.ok:
+                raise result.get()
+            sanitized_groups += int(result.get() or 0)
+        return sanitized_groups
+
+    learner = getattr(learner_group, "_learner", None)
+    if learner is None:
+        return 0
+    return _sanitize_resumed_learner_optimizers(learner)
+
+
 def _normalize_resume_from(resume_from: str) -> tuple[str, str]:
     """Return (path_for_restore, printable_path) for local paths and URIs."""
 
@@ -378,6 +601,29 @@ def _normalize_resume_from(resume_from: str) -> tuple[str, str]:
     if not resume_path.exists():
         raise FileNotFoundError(str(resume_path))
     return str(resume_path), str(resume_path)
+
+
+def _resolve_local_checkpoint_dir(checkpoint_path: str) -> Path:
+    if "://" in checkpoint_path:
+        raise ValueError(
+            "checkpoint replay currently requires a local checkpoint directory with resolved_config.json"
+        )
+
+    checkpoint_dir = Path(checkpoint_path).expanduser().resolve()
+    if not checkpoint_dir.exists():
+        raise FileNotFoundError(str(checkpoint_dir))
+    if not checkpoint_dir.is_dir():
+        raise NotADirectoryError(str(checkpoint_dir))
+    return checkpoint_dir
+
+
+def _load_checkpoint_resolved_config(checkpoint_dir: Path) -> dict[str, Any]:
+    resolved_config_path = checkpoint_dir / "resolved_config.json"
+    if not resolved_config_path.exists():
+        raise FileNotFoundError(
+            f"resolved_config.json not found under checkpoint directory: {checkpoint_dir}"
+        )
+    return _resolve_train_config(load_train_config(resolved_config_path))
 
 
 def _extract_checkpoint_env_name(checkpoint_dir: Path) -> str | None:
@@ -441,6 +687,42 @@ def _resolve_eval_report_path(*, exp_dir: Path, output_path: str, default_name: 
     return p
 
 
+def _resolve_replay_output_dir(*, exp_dir: Path, output_dir: str, iteration: int) -> Path:
+    if output_dir:
+        p = Path(output_dir).expanduser()
+        if not p.is_absolute():
+            p = exp_dir / p
+    else:
+        p = exp_dir / "replays"
+    p = p / f"iter_{int(iteration):06d}"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _resolve_manual_replay_output_dir(
+    *,
+    checkpoint_dir: Path,
+    output_dir: str,
+    output_dir_source: str,
+) -> Path:
+    if output_dir_source == "cli":
+        p = Path(output_dir).expanduser()
+        if not p.is_absolute():
+            p = p.resolve()
+    elif output_dir_source == "config":
+        p = Path(output_dir).expanduser()
+        if not p.is_absolute():
+            p = checkpoint_dir / p
+    elif output_dir_source == "default":
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        p = checkpoint_dir / "replays_manual" / timestamp
+    else:
+        raise ValueError("output_dir_source must be one of: cli, config, default")
+
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def _write_eval_report(*, path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -474,6 +756,97 @@ def _build_evaluation_metadata(
         "seed_source": seed_source,
         "seed_list": [int(seed) for seed in eval_seeds],
         "strict_illegal_action": bool(strict_illegal_action),
+    }
+
+
+def _resolve_checkpoint_replay_request(
+    *,
+    checkpoint_config: dict[str, Any],
+    games: int | None,
+    seed: int | None,
+    seed_list: list[int] | None,
+    output_dir: str | None,
+    include_omniscient: bool | None,
+    seat_views: list[int] | None,
+    max_steps: int | None,
+    strict_illegal_action: bool | None,
+    quiet_ray_future_warning: bool | None,
+    quiet_new_api_stack_warning: bool | None,
+    quiet_ray_deprecation_warning: bool | None,
+) -> dict[str, Any]:
+    resolved_checkpoint_cfg = _resolve_train_config(checkpoint_config)
+    eval_cfg = resolved_checkpoint_cfg["evaluation"]
+    replay_cfg = eval_cfg["replay"]
+    warnings_cfg = resolved_checkpoint_cfg["warnings"]
+
+    replay_games = int(games) if games is not None else int(replay_cfg["games_per_eval"])
+    if replay_games <= 0:
+        raise ValueError("games must be positive")
+
+    replay_seed = int(seed) if seed is not None else int(resolved_checkpoint_cfg["seed"])
+    replay_seed_list = list(seed_list or [])
+    eval_seeds = _resolve_eval_seeds(
+        base_seed=replay_seed,
+        eval_games=replay_games,
+        seed_list=replay_seed_list,
+    )
+
+    if output_dir is not None:
+        replay_output_dir = str(output_dir)
+        replay_output_dir_source = "cli"
+    elif replay_cfg["output_dir"]:
+        replay_output_dir = str(replay_cfg["output_dir"])
+        replay_output_dir_source = "config"
+    else:
+        replay_output_dir = ""
+        replay_output_dir_source = "default"
+
+    replay_include_omniscient = (
+        bool(include_omniscient)
+        if include_omniscient is not None
+        else bool(replay_cfg["include_omniscient"])
+    )
+    replay_seat_views = _normalize_replay_seat_views(
+        list(seat_views) if seat_views is not None else list(replay_cfg["seat_views"]),
+        name="seat_views",
+    )
+    replay_max_steps = int(max_steps) if max_steps is not None else int(replay_cfg["max_steps"])
+    if replay_max_steps <= 0:
+        raise ValueError("max_steps must be positive")
+    if not replay_include_omniscient and not replay_seat_views:
+        raise ValueError("at least one replay view must be enabled")
+
+    return {
+        "checkpoint_config": resolved_checkpoint_cfg,
+        "eval_seeds": eval_seeds,
+        "seed_source": "fixed_list" if replay_seed_list else "range",
+        "seed": replay_seed,
+        "games": replay_games,
+        "output_dir": replay_output_dir,
+        "output_dir_source": replay_output_dir_source,
+        "include_omniscient": replay_include_omniscient,
+        "seat_views": replay_seat_views,
+        "max_steps": replay_max_steps,
+        "strict_illegal_action": (
+            bool(strict_illegal_action)
+            if strict_illegal_action is not None
+            else bool(eval_cfg["strict_illegal_action"])
+        ),
+        "quiet_ray_future_warning": (
+            bool(quiet_ray_future_warning)
+            if quiet_ray_future_warning is not None
+            else bool(warnings_cfg["quiet_ray_future_warning"])
+        ),
+        "quiet_new_api_stack_warning": (
+            bool(quiet_new_api_stack_warning)
+            if quiet_new_api_stack_warning is not None
+            else bool(warnings_cfg["quiet_new_api_stack_warning"])
+        ),
+        "quiet_ray_deprecation_warning": (
+            bool(quiet_ray_deprecation_warning)
+            if quiet_ray_deprecation_warning is not None
+            else bool(warnings_cfg["quiet_ray_deprecation_warning"])
+        ),
     }
 
 
@@ -753,6 +1126,134 @@ def _format_eval_console(metrics: dict[str, dict[str, float]]) -> str:
     return " ".join(parts)
 
 
+def _select_self_play_action(
+    *,
+    algorithm,
+    state,
+    pid: int,
+    mask: list[int],
+    policy_id: str,
+    columns: Any,
+    torch_module: Any,
+) -> int:
+    obs = {
+        "obs": encode_observation_vector(state, pid),
+        "action_mask": mask,
+    }
+    return _compute_policy_action(
+        algorithm=algorithm,
+        obs=obs,
+        columns=columns,
+        torch_module=torch_module,
+        policy_id=policy_id,
+    )
+
+
+def _generate_self_play_replays(
+    *,
+    algorithm,
+    rules: RulesConfig,
+    rules_path: str,
+    replay_seeds: list[int],
+    output_dir: Path,
+    include_omniscient: bool,
+    seat_views: list[int],
+    max_steps: int,
+    policy_mapping_fn: Any,
+    columns: Any,
+    torch_module: Any,
+    strict_illegal_action: bool,
+) -> list[str]:
+    if not replay_seeds:
+        return []
+    if not include_omniscient and not seat_views:
+        return []
+
+    written: list[str] = []
+
+    def _action_selector(pid: int, state, mask: list[int], policy_id: str) -> int:
+        return _select_self_play_action(
+            algorithm=algorithm,
+            state=state,
+            pid=pid,
+            mask=mask,
+            policy_id=policy_id,
+            columns=columns,
+            torch_module=torch_module,
+        )
+
+    for seed in replay_seeds:
+        episode = _ReplayEpisodeRef(episode_id=f"self_play_replay:{seed}")
+        policy_assignments = {
+            pid: str(policy_mapping_fn(pid, episode=episode))
+            for pid in range(4)
+        }
+        trace = build_self_play_replay_trace(
+            rules=rules,
+            seed=seed,
+            policy_assignments=policy_assignments,
+            action_selector=_action_selector,
+            max_steps=int(max_steps),
+            strict_illegal_action=bool(strict_illegal_action),
+            rules_path=rules_path,
+        )
+        written.extend(
+            str(path)
+            for path in write_replay_artifacts(
+                output_dir=output_dir,
+                trace=trace,
+                include_omniscient=bool(include_omniscient),
+                seat_views=[int(seat) for seat in seat_views],
+            )
+        )
+
+    return written
+
+
+def _generate_training_self_play_replays(
+    *,
+    algorithm,
+    rules: RulesConfig,
+    rules_path: str,
+    exp_dir: Path,
+    iteration: int,
+    eval_seeds: list[int],
+    replay_cfg: dict[str, Any],
+    policy_mapping_fn: Any,
+    columns: Any,
+    torch_module: Any,
+    strict_illegal_action: bool,
+) -> list[str]:
+    if not replay_cfg["enabled"]:
+        return []
+    if not replay_cfg["include_omniscient"] and not replay_cfg["seat_views"]:
+        return []
+
+    replay_seeds = [int(seed) for seed in eval_seeds[: int(replay_cfg["games_per_eval"])]]
+    if not replay_seeds:
+        return []
+
+    output_dir = _resolve_replay_output_dir(
+        exp_dir=exp_dir,
+        output_dir=replay_cfg["output_dir"],
+        iteration=iteration,
+    )
+    return _generate_self_play_replays(
+        algorithm=algorithm,
+        rules=rules,
+        rules_path=rules_path,
+        replay_seeds=replay_seeds,
+        output_dir=output_dir,
+        include_omniscient=bool(replay_cfg["include_omniscient"]),
+        seat_views=[int(seat) for seat in replay_cfg["seat_views"]],
+        max_steps=int(replay_cfg["max_steps"]),
+        policy_mapping_fn=policy_mapping_fn,
+        columns=columns,
+        torch_module=torch_module,
+        strict_illegal_action=bool(strict_illegal_action),
+    )
+
+
 def evaluate_checkpoint_with_rllib(
     *,
     checkpoint_path: str,
@@ -789,6 +1290,10 @@ def evaluate_checkpoint_with_rllib(
     )
 
     restore_path, display_path = _normalize_resume_from(checkpoint_path)
+    checkpoint_cfg = _maybe_load_checkpoint_runtime_config(restore_path)
+    backend_override = ""
+    if checkpoint_cfg is not None:
+        backend_override = str(checkpoint_cfg.get("torch_distributed_backend", "") or "")
     _try_register_checkpoint_env(checkpoint_path=restore_path, rules=rules, register_env=register_env)
 
     _apply_runtime_warning_controls(
@@ -804,7 +1309,10 @@ def evaluate_checkpoint_with_rllib(
 
     algo = None
     try:
-        algo = Algorithm.from_checkpoint(restore_path)
+        if backend_override:
+            print(f"[eval] torch_distributed_backend={backend_override}")
+        with _override_rllib_torch_distributed_backend(backend_override):
+            algo = Algorithm.from_checkpoint(restore_path)
 
         metrics: dict[str, dict[str, float]] = {}
         for baseline_name in baselines:
@@ -849,6 +1357,135 @@ def evaluate_checkpoint_with_rllib(
         if "report_path" in payload:
             print(f"[eval] report={payload['report_path']}")
 
+        return payload
+    finally:
+        if algo is not None:
+            algo.stop()
+        if started_ray:
+            ray.shutdown()
+
+
+def replay_checkpoint_with_rllib(
+    *,
+    checkpoint_path: str,
+    rules: RulesConfig,
+    rules_path: str = "",
+    games: int | None = None,
+    seed: int | None = None,
+    seed_list: list[int] | None = None,
+    output_dir: str | None = None,
+    include_omniscient: bool | None = None,
+    seat_views: list[int] | None = None,
+    max_steps: int | None = None,
+    quiet_ray_future_warning: bool | None = None,
+    quiet_new_api_stack_warning: bool | None = None,
+    quiet_ray_deprecation_warning: bool | None = None,
+    strict_illegal_action: bool | None = None,
+) -> dict[str, Any]:  # pragma: no cover
+    ray, torch, _, Columns, _, _, _, register_env = _require_rllib()
+
+    try:
+        from ray.rllib.algorithms.algorithm import Algorithm  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("RLlib Algorithm.from_checkpoint is unavailable in this Ray version") from e
+
+    checkpoint_dir = _resolve_local_checkpoint_dir(checkpoint_path)
+    display_path = str(checkpoint_dir)
+    request = _resolve_checkpoint_replay_request(
+        checkpoint_config=_load_checkpoint_resolved_config(checkpoint_dir),
+        games=games,
+        seed=seed,
+        seed_list=seed_list,
+        output_dir=output_dir,
+        include_omniscient=include_omniscient,
+        seat_views=seat_views,
+        max_steps=max_steps,
+        strict_illegal_action=strict_illegal_action,
+        quiet_ray_future_warning=quiet_ray_future_warning,
+        quiet_new_api_stack_warning=quiet_new_api_stack_warning,
+        quiet_ray_deprecation_warning=quiet_ray_deprecation_warning,
+    )
+    cfg = request["checkpoint_config"]
+    backend_override = str(cfg.get("torch_distributed_backend", "") or "")
+    self_play_cfg = cfg["self_play"]
+    _, opponent_policy_ids = _build_self_play_policy_ids(self_play_cfg)
+    policy_mapping_fn = _make_policy_mapping_fn(
+        seed=int(cfg["seed"]),
+        main_policy_id=SHARED_POLICY_ID,
+        opponent_policy_ids=opponent_policy_ids,
+        enabled=bool(self_play_cfg["enabled"]),
+        main_policy_opponent_prob=float(self_play_cfg["main_policy_opponent_prob"]),
+        seat0_always_main=bool(self_play_cfg["seat0_always_main"]),
+    )
+    resolved_output_dir = _resolve_manual_replay_output_dir(
+        checkpoint_dir=checkpoint_dir,
+        output_dir=str(request["output_dir"]),
+        output_dir_source=str(request["output_dir_source"]),
+    )
+
+    _try_register_checkpoint_env(checkpoint_path=display_path, rules=rules, register_env=register_env)
+    _apply_runtime_warning_controls(
+        quiet_ray_future_warning=bool(request["quiet_ray_future_warning"]),
+        quiet_new_api_stack_warning=bool(request["quiet_new_api_stack_warning"]),
+        quiet_ray_deprecation_warning=bool(request["quiet_ray_deprecation_warning"]),
+    )
+
+    started_ray = False
+    if not ray.is_initialized():
+        ray.init(ignore_reinit_error=True, include_dashboard=False, log_to_driver=True)
+        started_ray = True
+
+    algo = None
+    try:
+        if backend_override:
+            print(f"[replay] torch_distributed_backend={backend_override}")
+        with _override_rllib_torch_distributed_backend(backend_override):
+            algo = Algorithm.from_checkpoint(display_path)
+        replay_paths = _generate_self_play_replays(
+            algorithm=algo,
+            rules=rules,
+            rules_path=rules_path,
+            replay_seeds=[int(seed_value) for seed_value in request["eval_seeds"]],
+            output_dir=resolved_output_dir,
+            include_omniscient=bool(request["include_omniscient"]),
+            seat_views=[int(seat) for seat in request["seat_views"]],
+            max_steps=int(request["max_steps"]),
+            policy_mapping_fn=policy_mapping_fn,
+            columns=Columns,
+            torch_module=torch,
+            strict_illegal_action=bool(request["strict_illegal_action"]),
+        )
+
+        payload = {
+            "mode": "checkpoint_replay",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "checkpoint_path": display_path,
+            "resolved_config_path": str(checkpoint_dir / "resolved_config.json"),
+            "rules": _build_rules_metadata(rules=rules, rules_path=rules_path),
+            "replay": {
+                "games": int(request["games"]),
+                "base_seed": int(request["seed"]),
+                "seed_source": str(request["seed_source"]),
+                "seed_list": [int(seed_value) for seed_value in request["eval_seeds"]],
+                "include_omniscient": bool(request["include_omniscient"]),
+                "seat_views": [int(seat) for seat in request["seat_views"]],
+                "max_steps": int(request["max_steps"]),
+                "strict_illegal_action": bool(request["strict_illegal_action"]),
+                "output_dir": str(resolved_output_dir),
+                "files": list(replay_paths),
+            },
+            "self_play": {
+                "enabled": bool(self_play_cfg["enabled"]),
+                "opponent_pool_size": int(self_play_cfg["opponent_pool_size"]),
+                "main_policy_opponent_prob": float(self_play_cfg["main_policy_opponent_prob"]),
+                "seat0_always_main": bool(self_play_cfg["seat0_always_main"]),
+            },
+        }
+
+        print(f"[replay] checkpoint={display_path}")
+        print(f"[replay] output_dir={resolved_output_dir}")
+        for replay_path in replay_paths:
+            print(f"[replay] file={replay_path}")
         return payload
     finally:
         if algo is not None:
@@ -962,13 +1599,21 @@ def train_with_rllib(
         started_ray = True
 
     algo = None
+    backend_override = str(cfg["torch_distributed_backend"])
 
     try:
-        algo = _build_algorithm(algo_config)
+        if resume_from and _patch_torch_adam_for_resume(torch):
+            print("[train] resume_optimizer_patch=adam_foreach_false")
+        if backend_override:
+            print(f"[train] torch_distributed_backend={backend_override}")
+        with _override_rllib_torch_distributed_backend(backend_override):
+            algo = _build_algorithm(algo_config)
         if resume_from:
             restore_path, display_path = _normalize_resume_from(resume_from)
             algo.restore(restore_path)
+            sanitized_groups = _sanitize_resumed_algorithm_optimizers(algo)
             print(f"[train] resumed_from={display_path}")
+            print(f"[train] resume_optimizer_state_sanitized param_groups={sanitized_groups}")
 
         next_snapshot_slot = 0
         if opponent_policy_ids and not resume_from:
@@ -1027,6 +1672,19 @@ def train_with_rllib(
                     )
 
                 print(f"[eval] {_format_eval_console(eval_metrics)}")
+                replay_paths = _generate_training_self_play_replays(
+                    algorithm=algo,
+                    rules=rules_template,
+                    rules_path=rules_path,
+                    exp_dir=exp_dir,
+                    iteration=iteration,
+                    eval_seeds=eval_seeds,
+                    replay_cfg=eval_cfg["replay"],
+                    policy_mapping_fn=policy_mapping_fn,
+                    columns=Columns,
+                    torch_module=torch,
+                    strict_illegal_action=bool(eval_cfg["strict_illegal_action"]),
+                )
 
                 eval_payload = {
                     "report_schema_version": EVAL_REPORT_SCHEMA_VERSION,
@@ -1050,6 +1708,14 @@ def train_with_rllib(
                         "snapshot_interval": int(self_play_cfg["snapshot_interval"]),
                         "main_policy_opponent_prob": float(self_play_cfg["main_policy_opponent_prob"]),
                     },
+                    "replay": {
+                        "enabled": bool(eval_cfg["replay"]["enabled"]),
+                        "games_per_eval": int(eval_cfg["replay"]["games_per_eval"]),
+                        "include_omniscient": bool(eval_cfg["replay"]["include_omniscient"]),
+                        "seat_views": [int(seat) for seat in eval_cfg["replay"]["seat_views"]],
+                        "output_dir": str(eval_cfg["replay"]["output_dir"] or ""),
+                        "files": list(replay_paths),
+                    },
                 }
                 eval_path = _resolve_eval_report_path(
                     exp_dir=exp_dir,
@@ -1058,6 +1724,8 @@ def train_with_rllib(
                 )
                 _write_eval_report(path=eval_path, payload=eval_payload)
                 print(f"[eval] report={eval_path}")
+                for replay_path in replay_paths:
+                    print(f"[replay] file={replay_path}")
     finally:
         try:
             if algo is not None:
@@ -1163,6 +1831,46 @@ def run_evaluation_entry(
         strict_illegal_action=bool(strict_illegal_action),
         benchmark_name=str(benchmark_name or ""),
         benchmark_config_path=str(benchmark_config_path or ""),
+    )
+
+
+def run_checkpoint_replay_entry(
+    *,
+    checkpoint_path: str,
+    rules_path: str,
+    seed: int | None,
+    games: int | None,
+    seed_list: list[int] | None,
+    output_dir: str | None,
+    include_omniscient: bool | None,
+    seat_views: list[int] | None,
+    max_steps: int | None,
+    quiet_ray_future_warning: bool | None = None,
+    quiet_new_api_stack_warning: bool | None = None,
+    quiet_ray_deprecation_warning: bool | None = None,
+    strict_illegal_action: bool | None = None,
+) -> dict[str, Any]:
+    rules: RulesConfig
+    if rules_path:
+        rules = load_rules(rules_path)
+    else:
+        rules = RulesConfig()
+
+    return replay_checkpoint_with_rllib(
+        checkpoint_path=checkpoint_path,
+        rules=rules,
+        rules_path=rules_path,
+        seed=None if seed is None else int(seed),
+        games=None if games is None else int(games),
+        seed_list=seed_list,
+        output_dir=output_dir,
+        include_omniscient=include_omniscient,
+        seat_views=seat_views,
+        max_steps=None if max_steps is None else int(max_steps),
+        quiet_ray_future_warning=quiet_ray_future_warning,
+        quiet_new_api_stack_warning=quiet_new_api_stack_warning,
+        quiet_ray_deprecation_warning=quiet_ray_deprecation_warning,
+        strict_illegal_action=strict_illegal_action,
     )
 
 

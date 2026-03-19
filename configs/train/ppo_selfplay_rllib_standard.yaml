@@ -41,3 +41,10 @@ evaluation:
   seed_list: []
   output_path: ""
   strict_illegal_action: true
+  replay:
+    enabled: true
+    games_per_eval: 1
+    output_dir: ""
+    include_omniscient: true
+    seat_views: [0]
+    max_steps: 5000

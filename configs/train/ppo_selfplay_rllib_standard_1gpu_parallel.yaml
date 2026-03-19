@@ -1,26 +1,30 @@
-experiment_name: ppo_selfplay_smoke
+experiment_name: ppo_selfplay_standard_1gpu_parallel
 seed: 1
 run_dir: runs
-num_iterations: 1
-checkpoint_every: 1
+num_iterations: 20
+checkpoint_every: 5
 
-rollout_workers: 0
-num_envs_per_worker: 1
-num_gpus: 0
+# Keep one local GPU learner, but raise sampling parallelism so training is
+# less likely to bottleneck on a single local env runner.
+rollout_workers: 6
+num_envs_per_worker: 2
+num_gpus: 1
 num_learners: 0
 num_gpus_per_learner: null
 num_cpus_per_learner: auto
 
-train_batch_size: 512
-sgd_minibatch_size: 64
-num_sgd_iter: 1
+# Increase total batch size to better feed the GPU while keeping PPO knobs
+# close to the standard baseline.
+train_batch_size: 8192
+sgd_minibatch_size: 512
+num_sgd_iter: 10
 lr: 0.0003
 clip_param: 0.2
 gamma: 0.99
 lambda: 0.95
 
 model:
-  hidden_sizes: [64]
+  hidden_sizes: [512, 512]
 
 warnings:
   quiet_ray_future_warning: false
@@ -29,14 +33,14 @@ warnings:
 
 self_play:
   enabled: true
-  opponent_pool_size: 2
-  snapshot_interval: 1
+  opponent_pool_size: 4
+  snapshot_interval: 5
   main_policy_opponent_prob: 0.2
   seat0_always_main: true
 
 evaluation:
-  eval_every: 1
-  eval_games: 1
+  eval_every: 5
+  eval_games: 16
   baselines: [heuristic, random]
   seed_list: []
   output_path: ""
