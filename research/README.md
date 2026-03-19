@@ -17,6 +17,7 @@
 ## Current Entry Points
 - Active plan: `research/plans/ACTIVE_PLAN.md`
 - Master plan: `research/plans/mahjong-ai/master_plan_zh.md`
+- Self-play replay visualization plan: `research/plans/mahjong-ai/self_play_replay_visualization_plan_zh.md`
 - Project overview: `research/guides/project_overview_zh.md`
 - Latest handoff: `research/handoffs/2026-03-10_project_status_refresh.md`
 - Reviews index: `research/reviews/README.md`

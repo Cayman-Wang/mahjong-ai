@@ -57,6 +57,7 @@ pip install -e ".[rl,extras,dev]"
 
 - 推荐环境与 smoke 流程：`docs/training_env.md`
 - 正式训练模板：`configs/train/ppo_selfplay_rllib_smoke.yaml`、`configs/train/ppo_selfplay_rllib_standard.yaml`、`configs/train/ppo_selfplay_rllib_long_run.yaml`
+- 双卡正式训练模板：`configs/train/ppo_selfplay_rllib_standard_2gpu.yaml`、`configs/train/ppo_selfplay_rllib_long_run_2gpu.yaml`
 - 正式 benchmark 协议：`configs/eval/smoke.yaml`、`configs/eval/standard.yaml`、`configs/eval/long_run.yaml`
 
 最小训练：
@@ -74,11 +75,41 @@ PYTHONPATH=src python -m mahjong_ai.cli.main train-rllib \
   --config configs/train/ppo_selfplay_rllib_standard.yaml
 ```
 
+双卡训练建议使用：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m mahjong_ai.cli.main train-rllib \
+  --config configs/train/ppo_selfplay_rllib_standard_2gpu.yaml
+```
+
+如果目标是尽量追求更好结果，优先使用更强的双卡长训模板：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python -m mahjong_ai.cli.main train-rllib \
+  --config configs/train/ppo_selfplay_rllib_long_run_2gpu.yaml
+```
+
+说明：
+- `ppo_selfplay_rllib_standard.yaml` 保持单机轻量基线，默认 `rollout_workers: 0`
+- `ppo_selfplay_rllib_standard_2gpu.yaml` 使用 `num_learners: 2`、`num_gpus_per_learner: 1`，并提高采样并行度，适合双卡
+- `ppo_selfplay_rllib_long_run_2gpu.yaml` 进一步提高 batch、对手池和评测强度，适合做更稳定的长训对比
+
 训练默认启用共享主策略 + 对手池自对弈，可在训练模板中调整：
 - `self_play.opponent_pool_size`
 - `self_play.snapshot_interval`
 - `self_play.main_policy_opponent_prob`
 - `self_play.seat0_always_main`
+
+训练模板默认也会在每次周期评测时导出自对弈文本回放：
+- 全知视角：`runs/<experiment>/replays/iter_<iteration>/seed_<seed>_omniscient.txt`
+- `seat0` 视角：`runs/<experiment>/replays/iter_<iteration>/seed_<seed>_seat0.txt`
+
+可在 `evaluation.replay` 中调整：
+- `games_per_eval`
+- `include_omniscient`
+- `seat_views`
+- `output_dir`
+- `max_steps`
 
 如需静音 Ray FutureWarning / new API stack 提示（默认保留），可加：
 
@@ -116,6 +147,20 @@ PYTHONPATH=src python -m mahjong_ai.cli.main eval-rllib \
   --games 20 --seed 1 \
   --output runs/ppo_selfplay/eval_manual
 ```
+
+训练后单独导出 self-play 回放（不用重新 `train-rllib`）：
+
+```bash
+PYTHONPATH=src python -m mahjong_ai.cli.main replay-rllib \
+  --checkpoint runs/ppo_selfplay \
+  --games 1 --seed 1001 \
+  --seat-views 0 \
+  --include-omniscient
+```
+
+默认输出到：
+- `runs/<experiment>/replays_manual/<timestamp>/seed_<seed>_omniscient.txt`
+- `runs/<experiment>/replays_manual/<timestamp>/seed_<seed>_seat0.txt`
 
 对比多份评测报告：
 
